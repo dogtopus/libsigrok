@@ -23,8 +23,8 @@
 #define REQ_TIMEOUT 1000
 
 #define REQ_PACKET_LEN 0x08
-#define REQ_KEY_READ 0xfefe0000
-#define REQ_KEY_WRITE 0xfefe0001
+#define REQ_KEY_READ 0xfefe0001
+#define REQ_KEY_WRITE 0xfefe0000
 #define REQ_WRITE_ACK 0xfefefefe
 
 #define EP_IN 0x80
@@ -40,6 +40,7 @@
 #define REG_FWRAM_WRITE_START 0x2008
 #define REG_FWRAM_WRITE_END 0x201c
 #define REG_FWRAM_WRITE_PAGE 0x2020
+#define REG_DEV_VARIANT 0x2058
 
 #define FWRAM_MCU_PROG_FLASH 0
 #define FWRAM_FPGA_CFGRAM 4
@@ -260,7 +261,9 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 	return SR_OK;
 }
 
-static int program_fpga(const struct sr_dev_inst *sdi, const char *bitstream_name) {
+static int upload_bitstream_to_fpga(const struct sr_dev_inst *sdi,
+				    const char *bitstream_name)
+{
 	struct sr_resource bitstream;
 	struct drv_context *drvc;
 	int res;
@@ -269,13 +272,13 @@ static int program_fpga(const struct sr_dev_inst *sdi, const char *bitstream_nam
 
 	drvc = sdi->driver->context;
 
-	sr_info("Programming FPGA with bitstream file '%s'", bitstream_name);
+	sr_info("Uploading FPGA bitstream file '%s'", bitstream_name);
 
-	res = sr_resource_open(drvc->sr_ctx, &bitstream, SR_RESOURCE_FIRMWARE, bitstream_name);
+	res = sr_resource_open(drvc->sr_ctx, &bitstream, SR_RESOURCE_FIRMWARE,
+			       bitstream_name);
 	if (res != SR_OK) {
 		return res;
 	}
-
 
 	fw_size_page_aligned = ALIGN_4K(bitstream.size);
 
@@ -313,6 +316,23 @@ static int program_fpga(const struct sr_dev_inst *sdi, const char *bitstream_nam
 	}
 
 	return SR_OK;
+}
+
+SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi) {
+	uint32_t variant;
+	int result;
+
+	result = read_reg(sdi, REG_DEV_VARIANT, &variant);
+	if (result != SR_OK) {
+		return VARIANT_UNKNOWN;
+	}
+
+	if (variant >= VARIANT_MAX) {
+		sr_warn("%s, Unknown device variant %d.",  __func__, variant);
+		return VARIANT_UNKNOWN;
+	}
+
+	return variant;
 }
 
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data)

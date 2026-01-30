@@ -27,9 +27,22 @@
 
 #define LOG_PREFIX "px-logic"
 
-struct dev_context {
+enum device_variant {
+        VARIANT_UNKNOWN = -1,
+	VARIANT_32,
+	VARIANT_16_PRO,
+	VARIANT_16_PLUS,
+	VARIANT_16_BASE,
+        VARIANT_MAX,
 };
 
+struct dev_context {
+        enum device_variant variant;
+        struct sr_channel_group *cg_logic;
+        struct sr_channel_group *cg_pwm;
+};
+
+SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data);
 
 #endif
