@@ -318,7 +318,8 @@ static int upload_bitstream_to_fpga(const struct sr_dev_inst *sdi,
 	return SR_OK;
 }
 
-SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi) {
+SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi)
+{
 	uint32_t variant;
 	int result;
 
@@ -328,11 +329,28 @@ SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi) 
 	}
 
 	if (variant >= VARIANT_MAX) {
-		sr_warn("%s, Unknown device variant %d.",  __func__, variant);
+		sr_warn("%s, Unknown device variant %d.", __func__, variant);
 		return VARIANT_UNKNOWN;
 	}
 
 	return variant;
+}
+
+SR_PRIV int px_logic_upload_fpga_firmware(const struct sr_dev_inst *sdi)
+{
+	int res;
+
+	res = upload_bitstream_to_fpga(sdi, FPGA_STAGE1_NAME);
+	if (res != SR_OK) {
+		return res;
+	}
+
+	res = upload_bitstream_to_fpga(sdi, FPGA_STAGE2_NAME);
+	if (res != SR_OK) {
+		return res;
+	}
+
+	return SR_OK;
 }
 
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data)

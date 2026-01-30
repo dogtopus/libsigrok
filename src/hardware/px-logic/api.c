@@ -28,6 +28,40 @@
 
 #define USB_INTERFACE_MAIN 0
 
+static const uint32_t scanopts[] = {
+	SR_CONF_CONN,
+};
+
+static const uint32_t drvopts[] = {
+	SR_CONF_LOGIC_ANALYZER,
+	SR_CONF_SIGNAL_GENERATOR,
+};
+
+static const uint32_t devopts[] = {
+	SR_CONF_CONN | SR_CONF_GET,
+	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_LIMIT_MSEC | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
+	SR_CONF_VOLTAGE_THRESHOLD | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+};
+
+static const uint32_t devopts_cg_pwm[] = {
+	SR_CONF_ENABLED | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_OUTPUT_FREQUENCY | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_DUTY_CYCLE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+};
+
+static const uint32_t devopts_cg_ext_trig[] = {
+	SR_CONF_ENABLED | SR_CONF_GET | SR_CONF_SET,
+};
+
+static const int32_t trigger_matches[] = {
+	SR_TRIGGER_ZERO,    SR_TRIGGER_ONE,  SR_TRIGGER_RISING,
+	SR_TRIGGER_FALLING, SR_TRIGGER_EDGE,
+};
+
 static const char *variant_names[] = {
 	[VARIANT_32] = "Logic 32",
 	[VARIANT_16_PRO] = "Logic 16 Pro",
@@ -46,10 +80,10 @@ static struct sr_dev_driver px_logic_driver_info;
 
 static inline gboolean check_vid_pid(struct libusb_device_descriptor *des)
 {
-	return (des->idVendor != PXLOGIC_VID ||
-		des->idProduct != PXLOGIC_PID) &&
-	       (des->idVendor != PXLOGIC_OLD_VID ||
-		des->idProduct != PXLOGIC_OLD_PID);
+	return (des->idVendor == PXLOGIC_VID &&
+		des->idProduct == PXLOGIC_PID) ||
+	       (des->idVendor == PXLOGIC_OLD_VID &&
+		des->idProduct == PXLOGIC_OLD_PID);
 }
 
 static gboolean in_conn_devices(GSList *conn_devices, libusb_device *dev)
@@ -158,7 +192,7 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 		devc->cg_logic = cg;
 
 		for (i = 0; i < variant_logic_channels[variant]; i++) {
-			g_snprintf(name, sizeof(name) - 1, "CH%d", i);
+			g_snprintf(name, sizeof(name) - 1, "%d", i);
 			name[sizeof(name) - 1] = '\0';
 			ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_LOGIC,
 					    TRUE, name);
@@ -171,7 +205,21 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 		devc->cg_pwm = cg;
 
 		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
-				    "PWM0");
+				    "P0");
+		cg->channels = g_slist_append(cg->channels, ch);
+		ch_offset++;
+
+		/* Add external trigger channels. */
+		cg = sr_channel_group_new(sdi, "EXT Trigger", NULL);
+		devc->cg_ext_trig = cg;
+
+		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
+				    "TI");
+		cg->channels = g_slist_append(cg->channels, ch);
+		ch_offset++;
+
+		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
+				    "TO");
 		cg->channels = g_slist_append(cg->channels, ch);
 		ch_offset++;
 
@@ -245,7 +293,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			continue;
 		}
 
-		if (check_vid_pid(&des)) {
+		if (!check_vid_pid(&des)) {
 			continue;
 		}
 
@@ -305,6 +353,7 @@ static int config_get(uint32_t key, GVariant **data,
 		      const struct sr_dev_inst *sdi,
 		      const struct sr_channel_group *cg)
 {
+	struct sr_usb_dev_inst *usb;
 	int ret;
 
 	(void)sdi;
@@ -313,6 +362,16 @@ static int config_get(uint32_t key, GVariant **data,
 
 	ret = SR_OK;
 	switch (key) {
+	case SR_CONF_CONN:
+		if (!sdi || !sdi->conn)
+			return SR_ERR_ARG;
+		usb = sdi->conn;
+		if (usb->address == 255)
+			/* Device still needs to re-enumerate after firmware
+			 * upload, so we don't know its (future) address. */
+			return SR_ERR;
+		*data = g_variant_new_printf("%d.%d", usb->bus, usb->address);
+		break;
 	/* TODO */
 	default:
 		return SR_ERR_NA;
@@ -341,24 +400,105 @@ static int config_set(uint32_t key, GVariant *data,
 	return ret;
 }
 
-static int config_list(uint32_t key, GVariant **data,
-		       const struct sr_dev_inst *sdi,
-		       const struct sr_channel_group *cg)
+static int config_list_general(uint32_t key, GVariant **data,
+			       const struct sr_dev_inst *sdi)
 {
 	int ret;
 
-	(void)sdi;
-	(void)data;
-	(void)cg;
-
 	ret = SR_OK;
+
 	switch (key) {
 	/* TODO */
+	case SR_CONF_SCAN_OPTIONS:
+	case SR_CONF_DEVICE_OPTIONS:
+		return STD_CONFIG_LIST(key, data, sdi, NULL, scanopts, drvopts,
+				       devopts);
+	case SR_CONF_TRIGGER_MATCH:
+		*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
+		break;
+	case SR_CONF_VOLTAGE_THRESHOLD:
+		*data = std_gvar_min_max_step_thresholds(0, 6.0, 0.1);
+		break;
 	default:
 		return SR_ERR_NA;
 	}
 
 	return ret;
+}
+
+// static int config_list_cg_logic(uint32_t key, GVariant **data,
+// 				const struct sr_dev_inst *sdi)
+// {
+// 	(void)sdi;
+// 	int ret;
+
+// 	ret = SR_OK;
+// 	switch (key) {
+// 	case SR_CONF_DEVICE_OPTIONS:
+// 		*data = std_gvar_array_u32(ARRAY_AND_SIZE(devopts_cg_logic));
+// 		break;
+// 	default:
+// 		return SR_ERR_NA;
+// 	}
+
+// 	return ret;
+// }
+
+static int config_list_cg_ext_trig(uint32_t key, GVariant **data,
+				   const struct sr_dev_inst *sdi)
+{
+	(void)sdi;
+	int ret;
+
+	ret = SR_OK;
+	switch (key) {
+	case SR_CONF_DEVICE_OPTIONS:
+		*data = std_gvar_array_u32(ARRAY_AND_SIZE(devopts_cg_ext_trig));
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+
+	return ret;
+}
+
+static int config_list_cg_pwm(uint32_t key, GVariant **data,
+			      const struct sr_dev_inst *sdi)
+{
+	(void)sdi;
+	int ret;
+
+	ret = SR_OK;
+	switch (key) {
+	case SR_CONF_DEVICE_OPTIONS:
+		*data = std_gvar_array_u32(ARRAY_AND_SIZE(devopts_cg_pwm));
+		break;
+	case SR_CONF_OUTPUT_FREQUENCY:
+		*data = std_gvar_min_max_step(SR_HZ(1), SR_MHZ(1), SR_HZ(1));
+		break;
+	case SR_CONF_DUTY_CYCLE:
+		*data = std_gvar_min_max_step(0.01, 0.99, 0.01);
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+
+	return ret;
+}
+
+static int config_list(uint32_t key, GVariant **data,
+		       const struct sr_dev_inst *sdi,
+		       const struct sr_channel_group *cg)
+{
+	if (!cg) {
+		return config_list_general(key, data, sdi);
+	} else if (g_strcmp0(cg->name, "PWM") == 0) {
+		return config_list_cg_pwm(key, data, sdi);
+	} else if (g_strcmp0(cg->name, "EXT Trigger") == 0) {
+		return config_list_cg_ext_trig(key, data, sdi);
+	}
+
+	return SR_ERR_NA;
 }
 
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
