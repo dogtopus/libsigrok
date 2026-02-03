@@ -51,6 +51,23 @@
 #define FPGA_STAGE1_NAME "hspi_ddr_RST.bin"
 #define FPGA_STAGE2_NAME "hspi_ddr.bin"
 
+static uint32_t crc32(uint32_t crc, const uint8_t *ptr, gsize size)
+{
+	uint32_t result = ~crc;
+	uint32_t t;
+	for (; size; size--, ptr++) {
+		result ^= *ptr;
+		for (int i = 0; i < 8; i++) {
+			t = result & 1;
+			result >>= 1;
+			if (t)
+				result ^= 0xEDB88320;
+		}
+	}
+
+	return ~result;
+}
+
 /**
  * Do a roundtrip transaction over the control register access endpoint.
  * 
@@ -318,6 +335,47 @@ static int upload_bitstream_to_fpga(const struct sr_dev_inst *sdi,
 	return SR_OK;
 }
 
+static int fpga_checksum(const struct sr_dev_inst *sdi, uint32_t size,
+			 uint32_t *checksum)
+{
+	int res;
+	uint32_t crc;
+	uint8_t buf[4096];
+	gsize fw_size_page_aligned;
+	gsize actual_block_size;
+
+	crc = 0;
+
+	fw_size_page_aligned = ALIGN_4K(size);
+
+	res = write_reg(sdi, REG_FWRAM_READ_START, 0);
+	if (res != SR_OK) {
+		return res;
+	}
+	res = write_reg(sdi, REG_FWRAM_READ_END, fw_size_page_aligned);
+	if (res != SR_OK) {
+		return res;
+	}
+	res = write_reg(sdi, REG_FWRAM_READ_PAGE, FWRAM_FPGA_CFGRAM);
+	if (res != SR_OK) {
+		return res;
+	}
+
+	while (size != 0) {
+		actual_block_size = MIN(sizeof(buf), size);
+		res = fwram_ep_rx(sdi, buf, sizeof(buf));
+		if (res != SR_OK) {
+			return res;
+		}
+
+		crc = crc32(crc, buf, actual_block_size);
+		size -= actual_block_size;
+	}
+
+	*checksum = crc;
+	return SR_OK;
+}
+
 SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi)
 {
 	uint32_t variant;
@@ -351,6 +409,10 @@ SR_PRIV int px_logic_upload_fpga_firmware(const struct sr_dev_inst *sdi)
 	}
 
 	return SR_OK;
+}
+
+SR_PRIV int px_logic_init_device(const struct sr_dev_inst *sdi)
+{
 }
 
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data)

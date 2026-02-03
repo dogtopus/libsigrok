@@ -38,6 +38,11 @@ enum device_variant {
 
 struct dev_context {
 	enum device_variant variant;
+	gboolean streaming;
+	gboolean filter;
+	double voltage_threshold;
+	uint64_t samplerate;
+	uint64_t limit_samples;
 	struct sr_channel_group *cg_logic;
 	struct sr_channel_group *cg_pwm;
 	struct sr_channel_group *cg_ext_trig;

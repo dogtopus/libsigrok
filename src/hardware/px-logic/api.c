@@ -26,7 +26,13 @@
 #define PXLOGIC_OLD_VID 0x1a86
 #define PXLOGIC_OLD_PID 0x5237
 
+#define VTHRESH_MIN 0.1
+#define VTHRESH_MAX 6.0
+#define VTHRESH_STEP 0.1
+#define VTHRESH_DEFAULT 2.0
+
 #define USB_INTERFACE_MAIN 0
+#define USB_INTERFACE_DEBUG 1
 
 static const uint32_t scanopts[] = {
 	SR_CONF_CONN,
@@ -39,12 +45,12 @@ static const uint32_t drvopts[] = {
 
 static const uint32_t devopts[] = {
 	SR_CONF_CONN | SR_CONF_GET,
+	SR_CONF_CONTINUOUS | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
-	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
-	SR_CONF_LIMIT_MSEC | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 	SR_CONF_VOLTAGE_THRESHOLD | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
-	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const uint32_t devopts_cg_pwm[] = {
@@ -62,6 +68,13 @@ static const int32_t trigger_matches[] = {
 	SR_TRIGGER_FALLING, SR_TRIGGER_EDGE,
 };
 
+static const uint64_t samplerates[] = {
+	SR_MHZ(1),   SR_MHZ(2),	  SR_MHZ(4),   SR_MHZ(5),
+	SR_MHZ(10),  SR_MHZ(20),  SR_MHZ(25),  SR_MHZ(50),
+	SR_MHZ(100), SR_MHZ(125), SR_MHZ(200), SR_MHZ(250),
+	SR_MHZ(400), SR_MHZ(500), SR_MHZ(800), SR_GHZ(1),
+};
+
 static const char *variant_names[] = {
 	[VARIANT_32] = "Logic 32",
 	[VARIANT_16_PRO] = "Logic 16 Pro",
@@ -74,6 +87,13 @@ static int variant_logic_channels[] = {
 	[VARIANT_16_PRO] = 16,
 	[VARIANT_16_PLUS] = 16,
 	[VARIANT_16_BASE] = 16,
+};
+
+static unsigned int variant_samplerate_cutoff[] = {
+	[VARIANT_32] = ARRAY_SIZE(samplerates),
+	[VARIANT_16_PRO] = ARRAY_SIZE(samplerates),
+	[VARIANT_16_PLUS] = ARRAY_SIZE(samplerates) - 2,
+	[VARIANT_16_BASE] = ARRAY_SIZE(samplerates) - 4,
 };
 
 static struct sr_dev_driver px_logic_driver_info;
@@ -314,6 +334,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			libusb_get_bus_number(devlist[i]),
 			libusb_get_device_address(devlist[i]), NULL);
 		devc = g_malloc0(sizeof(struct dev_context));
+		devc->voltage_threshold = VTHRESH_DEFAULT;
 		sdi->priv = devc;
 
 		res = detect_device_variant(sdi, devlist[i]);
@@ -354,10 +375,11 @@ static int config_get(uint32_t key, GVariant **data,
 		      const struct sr_channel_group *cg)
 {
 	struct sr_usb_dev_inst *usb;
+	struct dev_context *devc;
 	int ret;
 
-	(void)sdi;
-	(void)data;
+	devc = sdi->priv;
+
 	(void)cg;
 
 	ret = SR_OK;
@@ -372,6 +394,22 @@ static int config_get(uint32_t key, GVariant **data,
 			return SR_ERR;
 		*data = g_variant_new_printf("%d.%d", usb->bus, usb->address);
 		break;
+	case SR_CONF_CONTINUOUS:
+		*data = g_variant_new_boolean(devc->streaming);
+		break;
+	case SR_CONF_FILTER:
+		*data = g_variant_new_boolean(devc->filter);
+		break;
+	case SR_CONF_SAMPLERATE:
+		*data = g_variant_new_uint64(devc->samplerate);
+		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		*data = g_variant_new_uint64(devc->limit_samples);
+		break;
+	case SR_CONF_VOLTAGE_THRESHOLD:
+		*data = std_gvar_tuple_double(devc->voltage_threshold,
+					      devc->voltage_threshold);
+		break;
 	/* TODO */
 	default:
 		return SR_ERR_NA;
@@ -385,6 +423,10 @@ static int config_set(uint32_t key, GVariant *data,
 		      const struct sr_channel_group *cg)
 {
 	int ret;
+	struct dev_context *devc;
+	double l, h;
+
+	devc = sdi->priv;
 
 	(void)sdi;
 	(void)data;
@@ -392,6 +434,22 @@ static int config_set(uint32_t key, GVariant *data,
 
 	ret = SR_OK;
 	switch (key) {
+	case SR_CONF_CONTINUOUS:
+		devc->streaming = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_FILTER:
+		devc->filter = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_SAMPLERATE:
+		devc->samplerate = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		devc->limit_samples = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_VOLTAGE_THRESHOLD:
+		g_variant_get(data, "(dd)", &l, &h);
+		devc->voltage_threshold = l;
+		break;
 	/* TODO */
 	default:
 		ret = SR_ERR_NA;
@@ -404,7 +462,9 @@ static int config_list_general(uint32_t key, GVariant **data,
 			       const struct sr_dev_inst *sdi)
 {
 	int ret;
+	struct dev_context *devc;
 
+	devc = sdi->priv;
 	ret = SR_OK;
 
 	switch (key) {
@@ -417,7 +477,12 @@ static int config_list_general(uint32_t key, GVariant **data,
 		*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
 		break;
 	case SR_CONF_VOLTAGE_THRESHOLD:
-		*data = std_gvar_min_max_step_thresholds(0, 6.0, 0.1);
+		*data = std_gvar_min_max_step_thresholds(
+			VTHRESH_MIN, VTHRESH_MAX, VTHRESH_STEP);
+		break;
+	case SR_CONF_SAMPLERATE:
+		*data = std_gvar_samplerates(
+			samplerates, variant_samplerate_cutoff[devc->variant]);
 		break;
 	default:
 		return SR_ERR_NA;
@@ -425,24 +490,6 @@ static int config_list_general(uint32_t key, GVariant **data,
 
 	return ret;
 }
-
-// static int config_list_cg_logic(uint32_t key, GVariant **data,
-// 				const struct sr_dev_inst *sdi)
-// {
-// 	(void)sdi;
-// 	int ret;
-
-// 	ret = SR_OK;
-// 	switch (key) {
-// 	case SR_CONF_DEVICE_OPTIONS:
-// 		*data = std_gvar_array_u32(ARRAY_AND_SIZE(devopts_cg_logic));
-// 		break;
-// 	default:
-// 		return SR_ERR_NA;
-// 	}
-
-// 	return ret;
-// }
 
 static int config_list_cg_ext_trig(uint32_t key, GVariant **data,
 				   const struct sr_dev_inst *sdi)
