@@ -36,8 +36,27 @@ enum device_variant {
 	VARIANT_MAX,
 };
 
-struct dev_context {
+enum clk_config {
+	CLK_1GHZ,
+	CLK_500MHZ,
+	CLK_250MHZ,
+	CLK_125MHZ,
+	CLK_800MHZ,
+	CLK_400MHZ,
+	CLK_200MHZ,
+	CLK_100MHZ,
+	CLK_NUM_SUPPORTED,
+};
+
+struct dev_config {
+	uint16_t vid;
+	uint16_t pid;
+
 	enum device_variant variant;
+};
+
+struct dev_context {
+	struct dev_config config;
 	gboolean streaming;
 	gboolean filter;
 	double voltage_threshold;
@@ -49,7 +68,8 @@ struct dev_context {
 };
 
 SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi);
-SR_PRIV int px_logic_upload_fpga_firmware(const struct sr_dev_inst *sdi);
+SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi);
+SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data);
 
 #endif

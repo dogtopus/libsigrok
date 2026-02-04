@@ -122,7 +122,14 @@ static gboolean in_conn_devices(GSList *conn_devices, libusb_device *dev)
 	return FALSE;
 }
 
-static gboolean check_descriptor(libusb_device *dev)
+/**
+ * Match descriptor text fields and extract the device serial number.
+ * 
+ * @param dev 
+ * @param serial_num 
+ * @return TRUE if everything is OK.
+ */
+static gboolean process_descriptor(libusb_device *dev, char serial_num[64])
 {
 	struct libusb_device_descriptor des;
 	struct libusb_device_handle *hdl;
@@ -143,6 +150,12 @@ static gboolean check_descriptor(libusb_device *dev)
 						       sizeof(strdesc)) < 0)
 			break;
 		if (strcmp((const char *)strdesc, "PX"))
+			break;
+
+		/* Extract serial number. */
+		if (libusb_get_string_descriptor_ascii(
+			    hdl, des.iSerialNumber, (unsigned char *)serial_num,
+			    sizeof(strdesc)) < 0)
 			break;
 
 		/* If we made it here, the strings must match. */
@@ -195,7 +208,7 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 		variant = px_logic_get_variant(sdi);
 
 		/* Change the variant. */
-		devc->variant = variant;
+		devc->config.variant = variant;
 		if (variant == VARIANT_UNKNOWN) {
 			// result = SR_OK;
 			goto done;
@@ -275,7 +288,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	libusb_device **devlist;
 	unsigned int i;
 	const char *conn;
-	char connection_id[64];
+	char connection_id[64], serial_number[64];
 	int res;
 
 	devices = NULL;
@@ -317,7 +330,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			continue;
 		}
 
-		if (!check_descriptor(devlist[i])) {
+		if (!process_descriptor(devlist[i], serial_number)) {
 			continue;
 		}
 
@@ -328,12 +341,15 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		sdi->status = SR_ST_INITIALIZING;
 		sdi->vendor = g_strdup("PX");
 		sdi->model = g_strdup("Logic");
+		sdi->serial_num = g_strdup((const char *)serial_number);
 		sdi->connection_id = g_strdup(connection_id);
 		sdi->inst_type = SR_INST_USB;
 		sdi->conn = sr_usb_dev_inst_new(
 			libusb_get_bus_number(devlist[i]),
 			libusb_get_device_address(devlist[i]), NULL);
 		devc = g_malloc0(sizeof(struct dev_context));
+		devc->config.vid = des.idVendor;
+		devc->config.pid = des.idProduct;
 		devc->voltage_threshold = VTHRESH_DEFAULT;
 		sdi->priv = devc;
 
@@ -354,18 +370,62 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 
 static int dev_open(struct sr_dev_inst *sdi)
 {
-	(void)sdi;
+	struct sr_usb_dev_inst *usb;
+	int ret;
+
+	usb = sdi->conn;
 
 	/* TODO: get handle from sdi->conn and open it. */
+
+	ret = px_logic_dev_open(sdi);
+	if (ret != SR_OK) {
+		sr_err("Unable to open device.");
+		return SR_ERR;
+	}
+
+	ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_MAIN);
+	if (ret != LIBUSB_SUCCESS) {
+		switch (ret) {
+		case LIBUSB_ERROR_BUSY:
+			sr_err("Unable to claim USB interface. Another "
+			       "program or driver has already claimed it.");
+			break;
+		case LIBUSB_ERROR_NO_DEVICE:
+			sr_err("Device has been disconnected.");
+			break;
+		default:
+			sr_err("Unable to claim interface: %s.",
+			       libusb_error_name(ret));
+			break;
+		}
+
+		return SR_ERR;
+	}
+
+	ret = px_logic_fpga_ensure_init(sdi);
+	if (ret != SR_OK) {
+		return ret;
+	}
+
+	/* TODO FPGA register pull. */
 
 	return SR_OK;
 }
 
 static int dev_close(struct sr_dev_inst *sdi)
 {
-	(void)sdi;
+	struct sr_usb_dev_inst *usb;
 
-	/* TODO: get handle from sdi->conn and close it. */
+	usb = sdi->conn;
+
+	if (!usb->devhdl)
+		return SR_ERR_BUG;
+
+	sr_info("Closing device on %d.%d (logical) / %s (physical) interface %d.",
+		usb->bus, usb->address, sdi->connection_id, USB_INTERFACE_MAIN);
+	libusb_release_interface(usb->devhdl, USB_INTERFACE_MAIN);
+	libusb_close(usb->devhdl);
+	usb->devhdl = NULL;
 
 	return SR_OK;
 }
@@ -482,7 +542,8 @@ static int config_list_general(uint32_t key, GVariant **data,
 		break;
 	case SR_CONF_SAMPLERATE:
 		*data = std_gvar_samplerates(
-			samplerates, variant_samplerate_cutoff[devc->variant]);
+			samplerates,
+			variant_samplerate_cutoff[devc->config.variant]);
 		break;
 	default:
 		return SR_ERR_NA;

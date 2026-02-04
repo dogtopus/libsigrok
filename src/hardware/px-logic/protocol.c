@@ -21,6 +21,8 @@
 #include "protocol.h"
 
 #define REQ_TIMEOUT 1000
+#define FPGA_DELAY_UNIT_US 10000
+#define FPGA_SANITY_MAX_RECHECK 200
 
 #define REQ_PACKET_LEN 0x08
 #define REQ_KEY_READ 0xfefe0001
@@ -34,10 +36,14 @@
 #define EP_FIFO_SAMPLE 0x02
 #define EP_FIFO_FWRAM 0x03
 
+#define REG_CLK_CONF 0x0014
+#define REG_CLK_DIV 0x0018
+#define REG_STOP 0x0020
+
 #define REG_FWRAM_READ_START 0x200c
 #define REG_FWRAM_READ_END 0x2010
 #define REG_FWRAM_READ_PAGE 0x2014
-#define REG_FWRAM_WRITE_START 0x2008
+#define REG_FWRAM_WRITE_START 0x2018
 #define REG_FWRAM_WRITE_END 0x201c
 #define REG_FWRAM_WRITE_PAGE 0x2020
 #define REG_DEV_VARIANT 0x2058
@@ -50,23 +56,6 @@
 #define MCU_FW_NAME "SCI_LOGIC.bin"
 #define FPGA_STAGE1_NAME "hspi_ddr_RST.bin"
 #define FPGA_STAGE2_NAME "hspi_ddr.bin"
-
-static uint32_t crc32(uint32_t crc, const uint8_t *ptr, gsize size)
-{
-	uint32_t result = ~crc;
-	uint32_t t;
-	for (; size; size--, ptr++) {
-		result ^= *ptr;
-		for (int i = 0; i < 8; i++) {
-			t = result & 1;
-			result >>= 1;
-			if (t)
-				result ^= 0xEDB88320;
-		}
-	}
-
-	return ~result;
-}
 
 /**
  * Do a roundtrip transaction over the control register access endpoint.
@@ -132,9 +121,10 @@ static int reg_ep_trx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
 /**
  * Transmit data to the firmware RAM FIFO endpoint.
  * 
- * @param sdi Device context.
- * @param tx_buf Transmit buffer.
- * @param tx_len Amount of bytes to transmit.
+ * @param[in] sdi Device context.
+ * @param[in] tx_buf Transmit buffer.
+ * @param[in] tx_len Amount of bytes to transmit. If 0, clears the STALL
+ * condition on the endpoint and immediately return.
  *
  * @retval SR_OK Success.
  * @retval SR_ERR_IO Failed to transmit or receive data.
@@ -147,6 +137,11 @@ static int fwram_ep_tx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
 	int xfer_result, xfer_count;
 
 	usb = sdi->conn;
+
+	if (tx_len == 0) {
+		libusb_clear_halt(usb->devhdl, EP_OUT | EP_FIFO_FWRAM);
+		return SR_OK;
+	}
 
 	xfer_result = libusb_bulk_transfer(usb->devhdl, EP_OUT | EP_FIFO_FWRAM,
 					   tx_buf, tx_len, &xfer_count,
@@ -173,9 +168,10 @@ static int fwram_ep_tx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
 /**
  * Receive data from the firmware RAM FIFO endpoint.
  * 
- * @param sdi Device context.
- * @param rx_buf Receive buffer.
- * @param rx_len Amount of bytes to receive.
+ * @param[in] sdi Device context.
+ * @param[out] rx_buf Receive buffer.
+ * @param[in] rx_len Amount of bytes to receive. If 0, clears the STALL
+ * condition on the endpoint and immediately return.
  *
  * @retval SR_OK Success.
  * @retval SR_ERR_IO Failed to transmit or receive data.
@@ -188,6 +184,11 @@ static int fwram_ep_rx(const struct sr_dev_inst *sdi, uint8_t *rx_buf,
 	int xfer_result, xfer_count;
 
 	usb = sdi->conn;
+
+	if (rx_len == 0) {
+		libusb_clear_halt(usb->devhdl, EP_IN | EP_FIFO_FWRAM);
+		return SR_OK;
+	}
 
 	xfer_result = libusb_bulk_transfer(usb->devhdl, EP_IN | EP_FIFO_FWRAM,
 					   rx_buf, rx_len, &xfer_count,
@@ -312,17 +313,22 @@ static int upload_bitstream_to_fpga(const struct sr_dev_inst *sdi,
 		return res;
 	}
 
-	fw = g_malloc0(fw_size_page_aligned);
+	fw = g_try_malloc0(fw_size_page_aligned);
 	if (fw == NULL) {
 		return SR_ERR_MALLOC;
 	}
 
 	res = sr_resource_read(drvc->sr_ctx, &bitstream, fw, bitstream.size);
-	if (res != SR_OK) {
+	if (res <= 0) {
+		sr_err("Failed to read firmware file.");
+		sr_resource_close(drvc->sr_ctx, &bitstream);
 		g_free(fw);
 		return res;
 	}
 
+	sr_resource_close(drvc->sr_ctx, &bitstream);
+
+	fwram_ep_tx(sdi, NULL, 0);
 	res = fwram_ep_tx(sdi, fw, fw_size_page_aligned);
 
 	g_free(fw);
@@ -335,45 +341,40 @@ static int upload_bitstream_to_fpga(const struct sr_dev_inst *sdi,
 	return SR_OK;
 }
 
-static int fpga_checksum(const struct sr_dev_inst *sdi, uint32_t size,
-			 uint32_t *checksum)
-{
+static gboolean fpga_reg_sanity_check(const struct sr_dev_inst *sdi) {
 	int res;
-	uint32_t crc;
-	uint8_t buf[4096];
-	gsize fw_size_page_aligned;
-	gsize actual_block_size;
+	uint32_t reg;
 
-	crc = 0;
+	reg = 0xdeadbeef;
 
-	fw_size_page_aligned = ALIGN_4K(size);
-
-	res = write_reg(sdi, REG_FWRAM_READ_START, 0);
+	res = read_reg(sdi, REG_CLK_CONF, &reg);
 	if (res != SR_OK) {
-		return res;
+		return FALSE;
 	}
-	res = write_reg(sdi, REG_FWRAM_READ_END, fw_size_page_aligned);
+	if (reg >= CLK_NUM_SUPPORTED) {
+		return FALSE;
+	}
+
+	res = read_reg(sdi, REG_CLK_DIV, &reg);
 	if (res != SR_OK) {
-		return res;
+		return FALSE;
 	}
-	res = write_reg(sdi, REG_FWRAM_READ_PAGE, FWRAM_FPGA_CFGRAM);
+	/* We only support down to 1MHz so this never goes above 99. */
+	if (reg > 99) {
+		return FALSE;
+	}
+
+	res = read_reg(sdi, REG_STOP, &reg);
 	if (res != SR_OK) {
-		return res;
+		return FALSE;
+	}
+	/* STOP should be 0 on normal operation unless the configuration has
+	 * been interrupted (for now). */
+	if (reg != 0x00000000) {
+		return FALSE;
 	}
 
-	while (size != 0) {
-		actual_block_size = MIN(sizeof(buf), size);
-		res = fwram_ep_rx(sdi, buf, sizeof(buf));
-		if (res != SR_OK) {
-			return res;
-		}
-
-		crc = crc32(crc, buf, actual_block_size);
-		size -= actual_block_size;
-	}
-
-	*checksum = crc;
-	return SR_OK;
+	return TRUE;
 }
 
 SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi)
@@ -394,9 +395,17 @@ SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi)
 	return variant;
 }
 
-SR_PRIV int px_logic_upload_fpga_firmware(const struct sr_dev_inst *sdi)
+SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi)
 {
 	int res;
+	int fail_count;
+
+	if (fpga_reg_sanity_check(sdi)) {
+		sr_info("FPGA register config is sane. Skip FPGA initialization.");
+		return SR_OK;
+	}
+
+	sr_info("Initializing FPGA...");
 
 	res = upload_bitstream_to_fpga(sdi, FPGA_STAGE1_NAME);
 	if (res != SR_OK) {
@@ -408,11 +417,100 @@ SR_PRIV int px_logic_upload_fpga_firmware(const struct sr_dev_inst *sdi)
 		return res;
 	}
 
-	return SR_OK;
+	res = SR_ERR_TIMEOUT;
+	/* Wait until FPGA is fully configured. */
+	for (fail_count = 0; fail_count < FPGA_SANITY_MAX_RECHECK; fail_count++) {
+		if (fpga_reg_sanity_check(sdi)) {
+			res = SR_OK;
+			break;
+		}
+		g_usleep(FPGA_DELAY_UNIT_US);
+	}
+
+	if (res == SR_ERR_TIMEOUT) {
+		sr_err("FPGA initialization never completes.");
+	}
+	return res;
 }
 
-SR_PRIV int px_logic_init_device(const struct sr_dev_inst *sdi)
+SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 {
+	struct sr_dev_driver *di;
+
+	di = sdi->driver;
+
+	libusb_device **devlist;
+	struct sr_usb_dev_inst *usb;
+	struct libusb_device_descriptor des;
+	struct dev_context *devc;
+	struct drv_context *drvc;
+	int ret = SR_ERR, i, device_count;
+	uint32_t fw_version;
+	char connection_id[64];
+
+	drvc = di->context;
+	devc = sdi->priv;
+	usb = sdi->conn;
+	fw_version = 0;
+
+	device_count =
+		libusb_get_device_list(drvc->sr_ctx->libusb_ctx, &devlist);
+	if (device_count < 0) {
+		sr_err("Failed to get device list: %s.",
+		       libusb_error_name(device_count));
+		return SR_ERR;
+	}
+
+	for (i = 0; i < device_count; i++) {
+		libusb_get_device_descriptor(devlist[i], &des);
+
+		if (des.idVendor != devc->config.vid ||
+		    des.idProduct != devc->config.pid)
+			continue;
+
+		if ((sdi->status == SR_ST_INITIALIZING) ||
+		    (sdi->status == SR_ST_INACTIVE)) {
+			/* Check device by its physical USB bus/port address. */
+			if (usb_get_port_path(devlist[i], connection_id,
+					      sizeof(connection_id)) < 0)
+				continue;
+
+			if (strcmp(sdi->connection_id, connection_id))
+				/* This is not the one. */
+				continue;
+		}
+
+		if (!(ret = libusb_open(devlist[i], &usb->devhdl))) {
+			if (usb->address == 0xff)
+				/*
+				 * First time we touch this device after FW
+				 * upload, so we don't know the address yet.
+				 */
+				usb->address =
+					libusb_get_device_address(devlist[i]);
+		} else {
+			sr_err("Failed to open device: %s.",
+			       libusb_error_name(ret));
+			ret = SR_ERR;
+			break;
+		}
+
+		/* Check version */
+		ret = read_reg(sdi, 0x2034, &fw_version);
+		if (ret != SR_OK) {
+			break;
+		}
+
+		sr_info("MCU Version: %#010x", fw_version);
+
+		ret = SR_OK;
+
+		break;
+	}
+
+	libusb_free_device_list(devlist, 1);
+
+	return ret;
 }
 
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data)
