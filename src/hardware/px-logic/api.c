@@ -26,11 +26,6 @@
 #define PXLOGIC_OLD_VID 0x1a86
 #define PXLOGIC_OLD_PID 0x5237
 
-#define VTHRESH_MIN 0.1
-#define VTHRESH_MAX 6.0
-#define VTHRESH_STEP 0.1
-#define VTHRESH_DEFAULT 2.0
-
 #define USB_INTERFACE_MAIN 0
 #define USB_INTERFACE_DEBUG 1
 
@@ -350,7 +345,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc = g_malloc0(sizeof(struct dev_context));
 		devc->config.vid = des.idVendor;
 		devc->config.pid = des.idProduct;
-		devc->voltage_threshold = VTHRESH_DEFAULT;
+		devc->voltage_threshold = VREF_DEFAULT;
 		sdi->priv = devc;
 
 		res = detect_device_variant(sdi, devlist[i]);
@@ -402,12 +397,16 @@ static int dev_open(struct sr_dev_inst *sdi)
 		return SR_ERR;
 	}
 
+	/* FPGA initialization and register pull. */
 	ret = px_logic_fpga_ensure_init(sdi);
 	if (ret != SR_OK) {
 		return ret;
 	}
 
-	/* TODO FPGA register pull. */
+	ret = px_logic_receive_config(sdi);
+	if (ret != SR_OK) {
+		return ret;
+	}
 
 	return SR_OK;
 }
@@ -537,8 +536,8 @@ static int config_list_general(uint32_t key, GVariant **data,
 		*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
 		break;
 	case SR_CONF_VOLTAGE_THRESHOLD:
-		*data = std_gvar_min_max_step_thresholds(
-			VTHRESH_MIN, VTHRESH_MAX, VTHRESH_STEP);
+		*data = std_gvar_min_max_step_thresholds(VREF_MIN, VREF_MAX,
+							 VREF_STEP);
 		break;
 	case SR_CONF_SAMPLERATE:
 		*data = std_gvar_samplerates(

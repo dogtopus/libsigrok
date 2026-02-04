@@ -24,6 +24,10 @@
 #define FPGA_DELAY_UNIT_US 10000
 #define FPGA_SANITY_MAX_RECHECK 200
 
+#define FPGA_VCCIO (3.3)
+#define FPGA_F_PWM_VREF SR_MHZ(120)
+#define FPGA_INPUT_VDIV (1.0 / 2.0)
+
 #define REQ_PACKET_LEN 0x08
 #define REQ_KEY_READ 0xfefe0001
 #define REQ_KEY_WRITE 0xfefe0000
@@ -36,6 +40,8 @@
 #define EP_FIFO_SAMPLE 0x02
 #define EP_FIFO_FWRAM 0x03
 
+#define REG_PWM_VREF_CMP_PERIOD 0x0004
+#define REG_PWM_VREF_CMP_DUTY 0x0008
 #define REG_CLK_CONF 0x0014
 #define REG_CLK_DIV 0x0018
 #define REG_STOP 0x0020
@@ -46,6 +52,8 @@
 #define REG_FWRAM_WRITE_START 0x2018
 #define REG_FWRAM_WRITE_END 0x201c
 #define REG_FWRAM_WRITE_PAGE 0x2020
+#define REG_NUM_SAMPLES_LO 0x2024
+#define REG_NUM_SAMPLES_HI 0x2028
 #define REG_DEV_VARIANT 0x2058
 
 #define FWRAM_MCU_PROG_FLASH 0
@@ -341,7 +349,8 @@ static int upload_bitstream_to_fpga(const struct sr_dev_inst *sdi,
 	return SR_OK;
 }
 
-static gboolean fpga_reg_sanity_check(const struct sr_dev_inst *sdi) {
+static gboolean fpga_reg_sanity_check(const struct sr_dev_inst *sdi)
+{
 	int res;
 	uint32_t reg;
 
@@ -419,7 +428,8 @@ SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi)
 
 	res = SR_ERR_TIMEOUT;
 	/* Wait until FPGA is fully configured. */
-	for (fail_count = 0; fail_count < FPGA_SANITY_MAX_RECHECK; fail_count++) {
+	for (fail_count = 0; fail_count < FPGA_SANITY_MAX_RECHECK;
+	     fail_count++) {
 		if (fpga_reg_sanity_check(sdi)) {
 			res = SR_OK;
 			break;
@@ -511,6 +521,135 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 	libusb_free_device_list(devlist, 1);
 
 	return ret;
+}
+
+SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	int res;
+	uint32_t pwm_vref_period, pwm_vref_duty, clk_conf, clk_div,
+		num_samples_lo, num_samples_hi;
+	double pwm_vref_freq, io_vref;
+	uint64_t samplerate;
+
+	devc = sdi->priv;
+
+	pwm_vref_period = 0;
+	pwm_vref_duty = 0;
+	clk_conf = 0;
+	clk_div = 0;
+	num_samples_lo = 0;
+	num_samples_hi = 0;
+
+	res = read_reg(sdi, REG_PWM_VREF_CMP_PERIOD, &pwm_vref_period);
+	if (res != SR_OK) {
+		return res;
+	}
+	res = read_reg(sdi, REG_PWM_VREF_CMP_PERIOD, &pwm_vref_duty);
+	if (res != SR_OK) {
+		return res;
+	}
+	res = read_reg(sdi, REG_CLK_CONF, &clk_conf);
+	if (res != SR_OK) {
+		return res;
+	}
+	res = read_reg(sdi, REG_CLK_DIV, &clk_div);
+	if (res != SR_OK) {
+		return res;
+	}
+	res = read_reg(sdi, REG_NUM_SAMPLES_LO, &num_samples_lo);
+	if (res != SR_OK) {
+		return res;
+	}
+	res = read_reg(sdi, REG_NUM_SAMPLES_HI, &num_samples_hi);
+	if (res != SR_OK) {
+		return res;
+	}
+
+	pwm_vref_freq = (double)FPGA_F_PWM_VREF / pwm_vref_period;
+	io_vref = (double)pwm_vref_duty / pwm_vref_freq * FPGA_VCCIO /
+		  FPGA_INPUT_VDIV;
+
+	sr_info("VREF from device is %fV, switching freq is %fHz", io_vref,
+		pwm_vref_freq);
+
+	if (io_vref < VREF_MIN || io_vref > VREF_MAX) {
+		sr_info("VREF exceeds our threshold, reset to 2V.");
+		io_vref = VREF_DEFAULT;
+	}
+	devc->voltage_threshold = io_vref;
+
+	if (clk_div != 0 && clk_conf != CLK_100MHZ) {
+		sr_info("Custom sampling clock configuration is not supported "
+			"yet. Falling back to a safe default.");
+		samplerate = SR_MHZ(125);
+	} else {
+		switch (clk_conf) {
+		case CLK_1GHZ:
+			samplerate = SR_GHZ(1);
+			break;
+		case CLK_800MHZ:
+			samplerate = SR_MHZ(800);
+			break;
+		case CLK_500MHZ:
+			samplerate = SR_MHZ(500);
+			break;
+		case CLK_400MHZ:
+			samplerate = SR_MHZ(400);
+			break;
+		case CLK_250MHZ:
+			samplerate = SR_MHZ(250);
+			break;
+		case CLK_200MHZ:
+			samplerate = SR_MHZ(200);
+			break;
+		case CLK_125MHZ:
+			samplerate = SR_MHZ(125);
+			break;
+		case CLK_100MHZ:
+		default:
+			switch (clk_div) {
+			case 99:
+				samplerate = SR_MHZ(1);
+				break;
+			case 49:
+				samplerate = SR_MHZ(2);
+				break;
+			case 24:
+				samplerate = SR_MHZ(4);
+				break;
+			case 19:
+				samplerate = SR_MHZ(5);
+				break;
+			case 9:
+				samplerate = SR_MHZ(10);
+				break;
+			case 4:
+				samplerate = SR_MHZ(20);
+				break;
+			case 3:
+				samplerate = SR_MHZ(25);
+				break;
+			case 1:
+				samplerate = SR_MHZ(50);
+				break;
+			case 0:
+				samplerate = SR_MHZ(100);
+				break;
+			default:
+				sr_info("Irregular divider is not supported"
+					"yet. Falling back to a safe default.");
+				samplerate = SR_MHZ(125);
+				break;
+			}
+		}
+	}
+	devc->samplerate = samplerate;
+
+	devc->limit_samples = ((uint64_t)num_samples_lo) |
+			      ((uint64_t)num_samples_hi << 32);
+
+	return SR_OK;
 }
 
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data)

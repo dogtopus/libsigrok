@@ -27,6 +27,11 @@
 
 #define LOG_PREFIX "px-logic"
 
+#define VREF_MIN 0.1
+#define VREF_MAX 6.0
+#define VREF_STEP 0.1
+#define VREF_DEFAULT 2.0
+
 enum device_variant {
 	VARIANT_UNKNOWN = -1,
 	VARIANT_32,
@@ -70,6 +75,7 @@ struct dev_context {
 SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi);
+SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data);
 
 #endif
