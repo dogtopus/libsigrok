@@ -429,17 +429,14 @@ static int dev_close(struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-static int config_get(uint32_t key, GVariant **data,
-		      const struct sr_dev_inst *sdi,
-		      const struct sr_channel_group *cg)
+static int config_get_general(uint32_t key, GVariant **data,
+			      const struct sr_dev_inst *sdi)
 {
 	struct sr_usb_dev_inst *usb;
 	struct dev_context *devc;
 	int ret;
 
 	devc = sdi->priv;
-
-	(void)cg;
 
 	ret = SR_OK;
 	switch (key) {
@@ -477,19 +474,40 @@ static int config_get(uint32_t key, GVariant **data,
 	return ret;
 }
 
-static int config_set(uint32_t key, GVariant *data,
-		      const struct sr_dev_inst *sdi,
-		      const struct sr_channel_group *cg)
+static int config_get_pwm(uint32_t key, GVariant **data,
+			  const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	int ret;
+
+	devc = sdi->priv;
+
+	ret = SR_OK;
+	switch (key) {
+	case SR_CONF_ENABLED:
+		*data = g_variant_new_boolean(devc->pwm[0].enabled);
+		break;
+	case SR_CONF_OUTPUT_FREQUENCY:
+		*data = g_variant_new_double(devc->pwm[0].freq);
+		break;
+	case SR_CONF_DUTY_CYCLE:
+		*data = g_variant_new_double(devc->pwm[0].duty);
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+
+	return ret;
+}
+
+static int config_set_general(uint32_t key, GVariant *data,
+			      const struct sr_dev_inst *sdi)
 {
 	int ret;
 	struct dev_context *devc;
 	double l, h;
 
 	devc = sdi->priv;
-
-	(void)sdi;
-	(void)data;
-	(void)cg;
 
 	ret = SR_OK;
 	switch (key) {
@@ -508,6 +526,37 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_VOLTAGE_THRESHOLD:
 		g_variant_get(data, "(dd)", &l, &h);
 		devc->voltage_threshold = l;
+		break;
+	/* TODO */
+	default:
+		ret = SR_ERR_NA;
+	}
+
+	return ret;
+}
+
+static int config_set_pwm(uint32_t key, GVariant *data,
+			  const struct sr_dev_inst *sdi)
+{
+	int ret;
+	struct dev_context *devc;
+
+	devc = sdi->priv;
+
+	ret = SR_OK;
+	switch (key) {
+	case SR_CONF_ENABLED:
+		devc->pwm[0].enabled = g_variant_get_boolean(data);
+		sr_info("PWM0 enabled: %s.",
+			devc->pwm[0].enabled ? "true" : "false");
+		break;
+	case SR_CONF_OUTPUT_FREQUENCY:
+		devc->pwm[0].freq = g_variant_get_double(data);
+		sr_info("PWM0 freq: %fHz.", devc->pwm[0].freq);
+		break;
+	case SR_CONF_DUTY_CYCLE:
+		devc->pwm[0].duty = g_variant_get_double(data);
+		sr_info("PWM0 duty cycle: %f.", devc->pwm[0].duty);
 		break;
 	/* TODO */
 	default:
@@ -591,6 +640,30 @@ static int config_list_cg_pwm(uint32_t key, GVariant **data,
 	}
 
 	return ret;
+}
+
+static int config_get(uint32_t key, GVariant **data,
+		      const struct sr_dev_inst *sdi,
+		      const struct sr_channel_group *cg)
+{
+	if (!cg) {
+		return config_get_general(key, data, sdi);
+	} else if (g_strcmp0(cg->name, "PWM") == 0) {
+		return config_get_pwm(key, data, sdi);
+	}
+	return SR_ERR_NA;
+}
+
+static int config_set(uint32_t key, GVariant *data,
+		      const struct sr_dev_inst *sdi,
+		      const struct sr_channel_group *cg)
+{
+	if (!cg) {
+		return config_set_general(key, data, sdi);
+	} else if (g_strcmp0(cg->name, "PWM") == 0) {
+		return config_set_pwm(key, data, sdi);
+	}
+	return SR_ERR_NA;
 }
 
 static int config_list(uint32_t key, GVariant **data,

@@ -24,7 +24,7 @@
 #define FPGA_DELAY_UNIT_US 10000
 #define FPGA_SANITY_MAX_RECHECK 200
 
-#define FPGA_VCCIO (3.3)
+#define FPGA_VCCIO (3.334)
 #define FPGA_F_PWM_VREF SR_MHZ(120)
 #define FPGA_INPUT_VDIV (1.0 / 2.0)
 
@@ -40,6 +40,7 @@
 #define EP_FIFO_SAMPLE 0x02
 #define EP_FIFO_FWRAM 0x03
 
+#define REG_MODE 0x0000
 #define REG_PWM_VREF_CMP_PERIOD 0x0004
 #define REG_PWM_VREF_CMP_DUTY 0x0008
 #define REG_CLK_CONF 0x0014
@@ -58,6 +59,14 @@
 
 #define FWRAM_MCU_PROG_FLASH 0
 #define FWRAM_FPGA_CFGRAM 4
+
+#define MODE_MASK_INIT (1 << 0)
+#define MODE_MASK_STREAMING (1 << 1)
+#define MODE_MASK_INIT2 (1 << 2)
+#define MODE_MASK_FILTER_EN (1 << 3)
+#define MODE_MASK_UNK_4 (1 << 4)
+
+#define PWM_CONF_MASK_EN (1 << 0)
 
 #define ALIGN_4K(x) ((x / 4096 + 1) * 4096)
 
@@ -511,7 +520,7 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 			break;
 		}
 
-		sr_info("MCU Version: %#010x", fw_version);
+		sr_info("MCU Version: 0x%08x", fw_version);
 
 		ret = SR_OK;
 
@@ -527,7 +536,7 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	int res;
-	uint32_t pwm_vref_period, pwm_vref_duty, clk_conf, clk_div,
+	uint32_t pwm_vref_period, pwm_vref_duty, clk_conf, clk_div, mode,
 		num_samples_lo, num_samples_hi;
 	double pwm_vref_freq, io_vref;
 	uint64_t samplerate;
@@ -540,6 +549,7 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	clk_div = 0;
 	num_samples_lo = 0;
 	num_samples_hi = 0;
+	mode = 0;
 
 	res = read_reg(sdi, REG_PWM_VREF_CMP_PERIOD, &pwm_vref_period);
 	if (res != SR_OK) {
@@ -565,6 +575,10 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	if (res != SR_OK) {
 		return res;
 	}
+	res = read_reg(sdi, REG_MODE, &mode);
+	if (res != SR_OK) {
+		return res;
+	}
 
 	pwm_vref_freq = (double)FPGA_F_PWM_VREF / pwm_vref_period;
 	io_vref = (double)pwm_vref_duty / pwm_vref_freq * FPGA_VCCIO /
@@ -579,6 +593,9 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	}
 	devc->voltage_threshold = io_vref;
 
+	sr_info("Clock configuration on device: CLK_CONF = 0x%08x, "
+		"CLK_DIV = 0x%08x",
+		clk_conf, clk_div);
 	if (clk_div != 0 && clk_conf != CLK_100MHZ) {
 		sr_info("Custom sampling clock configuration is not supported "
 			"yet. Falling back to a safe default.");
@@ -648,6 +665,10 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 
 	devc->limit_samples = ((uint64_t)num_samples_lo) |
 			      ((uint64_t)num_samples_hi << 32);
+
+	sr_info("Mode configuration on device: 0x%08x", mode);
+	devc->streaming = mode & MODE_MASK_STREAMING;
+	devc->filter = mode & MODE_MASK_FILTER_EN;
 
 	return SR_OK;
 }

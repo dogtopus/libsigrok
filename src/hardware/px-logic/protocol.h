@@ -60,13 +60,23 @@ struct dev_config {
 	enum device_variant variant;
 };
 
+struct pwm_config {
+	gboolean enabled;
+	double freq;
+	double duty;
+};
+
 struct dev_context {
 	struct dev_config config;
+
 	gboolean streaming;
 	gboolean filter;
 	double voltage_threshold;
 	uint64_t samplerate;
 	uint64_t limit_samples;
+
+	struct pwm_config pwm[1];
+
 	struct sr_channel_group *cg_logic;
 	struct sr_channel_group *cg_pwm;
 	struct sr_channel_group *cg_ext_trig;
