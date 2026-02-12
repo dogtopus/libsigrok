@@ -29,6 +29,8 @@
 #define USB_INTERFACE_MAIN 0
 #define USB_INTERFACE_DEBUG 1
 
+#define GS SR_GHZ
+
 static const uint32_t scanopts[] = {
 	SR_CONF_CONN,
 };
@@ -46,6 +48,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 	SR_CONF_VOLTAGE_THRESHOLD | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const uint32_t devopts_cg_pwm[] = {
@@ -89,6 +92,13 @@ static unsigned int variant_samplerate_cutoff[] = {
 	[VARIANT_16_PRO] = ARRAY_SIZE(samplerates),
 	[VARIANT_16_PLUS] = ARRAY_SIZE(samplerates) - 2,
 	[VARIANT_16_BASE] = ARRAY_SIZE(samplerates) - 4,
+};
+
+static const uint64_t variant_depth[] = {
+	[VARIANT_32] = GS(4),
+	[VARIANT_16_PRO] = GS(4),
+	[VARIANT_16_PLUS] = GS(2),
+	[VARIANT_16_BASE] = GS(1),
 };
 
 static struct sr_dev_driver px_logic_driver_info;
@@ -212,6 +222,8 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 			g_free(sdi->model);
 		}
 		sdi->model = g_strdup(variant_names[variant]);
+
+		devc->config.buffer_depth = variant_depth[variant];
 
 		ch_offset = 0;
 
@@ -354,6 +366,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			g_free(sdi);
 			continue;
 		}
+		devc->config.speed = libusb_get_device_speed(devlist[i]);
 		devices = g_slist_append(devices, sdi);
 	}
 
@@ -466,6 +479,9 @@ static int config_get_general(uint32_t key, GVariant **data,
 		*data = std_gvar_tuple_double(devc->voltage_threshold,
 					      devc->voltage_threshold);
 		break;
+	case SR_CONF_CAPTURE_RATIO:
+		*data = g_variant_new_uint64(devc->capture_ratio);
+		break;
 	/* TODO */
 	default:
 		return SR_ERR_NA;
@@ -526,6 +542,9 @@ static int config_set_general(uint32_t key, GVariant *data,
 	case SR_CONF_VOLTAGE_THRESHOLD:
 		g_variant_get(data, "(dd)", &l, &h);
 		devc->voltage_threshold = l;
+		break;
+	case SR_CONF_CAPTURE_RATIO:
+		devc->capture_ratio = g_variant_get_uint64(data);
 		break;
 	/* TODO */
 	default:

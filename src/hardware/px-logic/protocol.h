@@ -56,14 +56,29 @@ enum clk_config {
 struct dev_config {
 	uint16_t vid;
 	uint16_t pid;
+	enum libusb_speed speed;
 
 	enum device_variant variant;
+	uint64_t buffer_depth;
 };
 
 struct pwm_config {
 	gboolean enabled;
 	double freq;
 	double duty;
+};
+
+struct channel_config {
+	uint32_t n;
+	uint32_t mask;
+};
+
+struct trigger_config {
+	uint32_t point;
+	uint32_t high_mask;
+	uint32_t low_mask;
+	uint32_t rising_mask;
+	uint32_t falling_mask;
 };
 
 struct dev_context {
@@ -74,8 +89,17 @@ struct dev_context {
 	double voltage_threshold;
 	uint64_t samplerate;
 	uint64_t limit_samples;
+	uint64_t capture_ratio;
 
+	/* Automatically generated values. */
+	uint32_t frame_size;
+	struct channel_config channels;
+
+	struct trigger_config trigger;
 	struct pwm_config pwm[1];
+
+	uint32_t trigger_point_real;
+	gboolean triggered;
 
 	struct sr_channel_group *cg_logic;
 	struct sr_channel_group *cg_pwm;
@@ -86,6 +110,9 @@ SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi);
+SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi);
+SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi);
+SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data);
 
 #endif
