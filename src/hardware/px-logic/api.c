@@ -231,6 +231,9 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 		cg = sr_channel_group_new(sdi, "Logic", NULL);
 		devc->cg_logic = cg;
 
+		devc->config.channels = variant_logic_channels[variant];
+		devc->config.sample_width = devc->config.channels / 8;
+
 		for (i = 0; i < variant_logic_channels[variant]; i++) {
 			g_snprintf(name, sizeof(name) - 1, "%d", i);
 			name[sizeof(name) - 1] = '\0';
@@ -705,18 +708,14 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	/* TODO: configure hardware, reset acquisition state, set up
 	 * callbacks and send header packet. */
 
-	(void)sdi;
-
-	return SR_OK;
+	return px_logic_acquisition_start(sdi);
 }
 
 static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
 	/* TODO: stop acquisition. */
 
-	(void)sdi;
-
-	return SR_OK;
+	return px_logic_acquisition_stop(sdi);
 }
 
 static struct sr_dev_driver px_logic_driver_info = {

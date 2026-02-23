@@ -53,6 +53,14 @@ enum clk_config {
 	CLK_NUM_SUPPORTED,
 };
 
+enum cap_state {
+	CAP_STATE_INIT,
+	CAP_STATE_WAIT_TRIGGER,
+	CAP_STATE_SAMPLE_XFER,
+	CAP_STATE_HALT,
+	CAP_STATE_CLEANUP,
+};
+
 struct dev_config {
 	uint16_t vid;
 	uint16_t pid;
@@ -60,6 +68,10 @@ struct dev_config {
 
 	enum device_variant variant;
 	uint64_t buffer_depth;
+	/** Number of total channels the device supports (16 or 32). */
+	uint8_t channels;
+	/** Sample width in bytes (2 or 4). */
+	uint8_t sample_width;
 };
 
 struct pwm_config {
@@ -81,9 +93,29 @@ struct trigger_config {
 	uint32_t falling_mask;
 };
 
+struct capture_state {
+	enum cap_state state;
+	uint32_t trigger_point_real;
+
+	//struct libusb_transfer *wft_xfer;
+	struct libusb_transfer **data_xfers;
+	uint8_t n_active_data_xfers;
+	uint64_t bytes_received;
+
+	struct sr_datafeed_logic logic;
+	struct sr_datafeed_packet packet;
+	uint8_t *xpose_buffer;
+	size_t xpose_buffer_size;
+
+	int timeout_counter;
+	//gboolean wft_done;
+};
+
 struct dev_context {
+	/* Hardware configuration. */
 	struct dev_config config;
 
+	/* Capture properties. */
 	gboolean streaming;
 	gboolean filter;
 	double voltage_threshold;
@@ -91,19 +123,18 @@ struct dev_context {
 	uint64_t limit_samples;
 	uint64_t capture_ratio;
 
-	/* Automatically generated values. */
-	uint32_t frame_size;
-	struct channel_config channels;
-
 	struct trigger_config trigger;
 	struct pwm_config pwm[1];
 
-	uint32_t trigger_point_real;
-	gboolean triggered;
+	/* Values derived from properties. */
+	uint32_t frame_size;
+	struct channel_config channels;
 
 	struct sr_channel_group *cg_logic;
 	struct sr_channel_group *cg_pwm;
 	struct sr_channel_group *cg_ext_trig;
+
+	struct capture_state cap;
 };
 
 SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi);

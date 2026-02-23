@@ -18,6 +18,7 @@
  */
 
 #include <config.h>
+#include <strings.h>
 #include "protocol.h"
 
 #define FRAME_SIZE_MS 10
@@ -26,6 +27,8 @@
 #define REQ_TIMEOUT 1000
 #define FPGA_DELAY_UNIT_US 10000
 #define FPGA_SANITY_MAX_RECHECK 200
+
+#define NUM_SIMUL_XFERS 32
 
 #define FPGA_VCCIO (3.334)
 #define FPGA_F_PWM_VREF SR_MHZ(120)
@@ -210,29 +213,94 @@ static int convert_trigger(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-static void deinterleave_buffer(const uint8_t *src, size_t length,
-				uint32_t *dst_ptr, size_t channel_count,
-				uint32_t channel_mask)
+static inline void write_bit_le(uint8_t *dest, uint8_t bitpos, int bit)
 {
-	uint32_t sample;
+	const size_t offset = bitpos / 8;
+	const size_t mask = 1 << (bitpos % 8);
 
-	for (const uint64_t *src_ptr = (uint64_t *)src;
-	     src_ptr < (uint64_t *)(src + length); src_ptr += channel_count) {
-		for (int bit = 0; bit != 64; bit++) {
-			const uint64_t *word_ptr = src_ptr;
-			sample = 0;
-			for (unsigned int channel = 0; channel != 32;
-			     channel++) {
-				const uint32_t m = channel_mask >> channel;
-				if (!m)
-					break;
-				if ((m & 1) &&
-				    ((*word_ptr++ >> bit) & UINT64_C(1)))
-					sample |= 1 << channel;
+	if (bit)
+		dest[offset] |= mask;
+	else
+		dest[offset] &= ~mask;
+}
+
+/**
+ * Transpose the DSLogic-style samples (striped channels) to sigrok-style
+ * (bitfield samples padded to bytes).
+ *
+ * Converts the samples from format of
+ *
+ * `aaa...bbb...ccc...ddd...`
+ *
+ * to
+ *
+ * `abcd...abcd...abcd...`
+ * 
+ * @param src Samples in striped channels format.
+ *
+ * @param length Total length of the samples in bytes. Must be aligned to 64
+ *               samples.
+ *
+ * @param dst_ptr Samples in bitfield format.
+ *
+ * @param channel_count Number of active channels. Must be consistent with
+ *                      channel_mask.
+ *
+ * @param channel_mask Active channels. Must be consistent with channel_count.
+ *
+ * @param sample_width_bytes Sample width in bytes (2 or 4 depending on
+ *                           variant).
+ */
+static size_t cap_transpose_samples(const uint8_t *src, size_t length,
+				    uint8_t *dst_ptr, size_t channel_count,
+				    uint32_t channel_mask,
+				    size_t sample_width_bytes)
+{
+	const uint8_t *const end_ptr = src + length;
+	const size_t stripes_step = channel_count * STRIPE_SIZE_BYTES;
+	const size_t sample_width_bits = sample_width_bytes * 8;
+
+	const uint8_t *src_ptr, *stripe_ptr;
+	uint8_t *out_ptr;
+	uint8_t s_pos, channel;
+	uint64_t stripe;
+	size_t out_samples;
+
+	out_ptr = dst_ptr;
+	out_samples = 0;
+
+	/* Process one 64-sample group of all channels at a time. */
+	for (src_ptr = src; src_ptr < end_ptr; src_ptr += stripes_step) {
+		stripe_ptr = src_ptr;
+		/* TODO: use ctz + bit clear here may be better. */
+		for (channel = 0; channel < sample_width_bits; channel++) {
+			/* This stripe does not belong to this bit in the
+			   output sample. */
+			if (!(channel_mask & (1 << channel))) {
+				continue;
 			}
-			*dst_ptr++ = sample;
+
+			/* Device endian. */
+			stripe = RL64(stripe_ptr);
+
+			/* Write the stripe as a column on the output sample
+			 * matrix. */
+			for (s_pos = 0; s_pos < STRIPE_SIZE_BITS; s_pos++) {
+				write_bit_le(
+					&out_ptr[sample_width_bytes * s_pos],
+					channel, !!(stripe & (1 << s_pos)));
+			}
+
+			stripe_ptr += STRIPE_SIZE_BYTES;
 		}
+
+		/* 64 converted samples, each 2 or 4 bytes in size. */
+		out_ptr += STRIPE_SIZE_BITS * sample_width_bytes;
+		out_samples += STRIPE_SIZE_BITS;
 	}
+
+	sr_spew("Transposed %zu samples", out_samples);
+	return out_samples;
 }
 
 /**
@@ -413,6 +481,7 @@ static int read_reg(const struct sr_dev_inst *sdi, uint32_t address,
 		    uint32_t *value)
 {
 	uint8_t trx[16];
+	uint32_t val;
 	int res;
 
 	WL32(trx, REQ_KEY_READ);
@@ -426,7 +495,10 @@ static int read_reg(const struct sr_dev_inst *sdi, uint32_t address,
 		return res;
 	}
 
-	*value = RL32(&trx[12]);
+	val = RL32(&trx[12]);
+	sr_spew("reg 0x%04x => 0x%08x", address, val);
+	*value = val;
+
 	return SR_OK;
 }
 
@@ -455,6 +527,8 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 {
 	uint8_t trx[16];
 	int res;
+
+	sr_spew("reg 0x%04x <= 0x%08x", address, value);
 
 	WL32(trx, REQ_KEY_WRITE);
 	WL32(&trx[4], REQ_PACKET_LEN);
@@ -616,14 +690,17 @@ compute_channel_config(const struct sr_dev_inst *sdi)
 static uint32_t compute_frame_size(enum libusb_speed speed, uint64_t samplerate,
 				   uint32_t nchannels)
 {
-	uint32_t max, typical;
+	uint32_t max, typical, final;
 
 	max = speed == LIBUSB_SPEED_SUPER ? MAX_FRAME_SIZE_SS :
 					    MAX_FRAME_SIZE_HS;
 
 	typical = (samplerate * nchannels) / 8 / (1000 / FRAME_SIZE_MS);
 
-	return MIN(max, typical) / 4096 / nchannels * 4096 * nchannels;
+	final = MIN(max, typical) / 4096 / nchannels * 4096 * nchannels;
+	sr_spew("Computed frame size is %u bytes", final);
+
+	return final;
 }
 
 static int config_sampler_clock(const struct sr_dev_inst *sdi)
@@ -667,29 +744,326 @@ static int config_sampler_clock(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-static void LIBUSB_CALL samples_fetched(struct libusb_transfer *xfer)
+static int cap_data_init(const struct sr_dev_inst *sdi)
 {
-	const struct sr_dev_inst *sdi;
-	sdi = xfer->user_data;
+	struct dev_context *devc;
+	devc = sdi->priv;
 
-	/* TODO */
-}
-
-static int fetch_samples(const struct sr_dev_inst *sdi)
-{
-	/* TODO */
-
-	std_session_send_df_header(sdi);
+	devc->cap.xpose_buffer_size = devc->frame_size / devc->channels.n * 8 *
+				      devc->config.sample_width;
+	sr_spew("%s: Allocating %zu bytes for transpose buffer", __func__,
+		devc->cap.xpose_buffer_size);
+	devc->cap.xpose_buffer = g_try_malloc0(devc->cap.xpose_buffer_size);
+	if (devc->cap.xpose_buffer == NULL) {
+		return SR_ERR_MALLOC;
+	}
 
 	return SR_OK;
 }
 
-static int stop_fetch_samples(const struct sr_dev_inst *sdi) {
-	/* TODO cancel USB transfer. */
-	std_session_send_df_end(sdi);
+static void cap_data_fini(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	devc = sdi->priv;
+
+	g_free(devc->cap.xpose_buffer);
+	devc->cap.xpose_buffer = NULL;
+	devc->cap.xpose_buffer_size = 0;
 }
 
-static int handle_events(int fd, int revents, void *cb_data)
+static void cap_data_send(const struct sr_dev_inst *sdi, const uint8_t *data,
+			  size_t length)
+{
+	struct dev_context *devc;
+	size_t samples;
+	devc = sdi->priv;
+
+	samples = cap_transpose_samples(data, length, devc->cap.xpose_buffer,
+					devc->channels.n, devc->channels.mask,
+					devc->config.sample_width);
+
+	const struct sr_datafeed_logic logic = {
+		.length = samples * devc->config.sample_width,
+		.unitsize = devc->config.sample_width,
+		.data = devc->cap.xpose_buffer
+	};
+
+	const struct sr_datafeed_packet packet = { .type = SR_DF_LOGIC,
+						   .payload = &logic };
+
+	sr_session_send(sdi, &packet);
+}
+
+/**
+ * Shortcut to resubmit an individual transfer. Must be called at a control
+ * flow tail.
+ */
+static void cap_sample_xfer_resubmit(struct libusb_transfer *xfer,
+				     struct dev_context *devc)
+{
+	int res;
+
+	res = libusb_submit_transfer(xfer);
+	if (res != LIBUSB_SUCCESS) {
+		sr_err("Failed to resubmit transfer: %s. Aborting "
+		       "session.",
+		       libusb_error_name(res));
+		devc->cap.state = CAP_STATE_HALT;
+	}
+}
+
+static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
+{
+	const struct sr_dev_inst *sdi;
+	struct dev_context *devc;
+	uint64_t bytes_received;
+
+	sdi = xfer->user_data;
+	devc = sdi->priv;
+
+	switch (xfer->status) {
+	case LIBUSB_TRANSFER_CANCELLED:
+		devc->cap.n_active_data_xfers--;
+		break;
+	case LIBUSB_TRANSFER_NO_DEVICE:
+	case LIBUSB_TRANSFER_OVERFLOW:
+	case LIBUSB_TRANSFER_ERROR:
+	case LIBUSB_TRANSFER_STALL:
+		sr_err("Unrecoverable status %d. Aborting session.",
+		       xfer->status);
+		devc->cap.state = CAP_STATE_HALT;
+		break;
+	case LIBUSB_TRANSFER_TIMED_OUT:
+	case LIBUSB_TRANSFER_COMPLETED:
+		sr_spew("got %d bytes from sample FIFO", xfer->actual_length);
+
+		if (xfer->actual_length == 0) {
+			/* Timeout or we got 0 bytes. Make a note about this. */
+			if (devc->cap.timeout_counter >= 10) {
+				sr_err("Device stopped responding. Aborting "
+				       "session.");
+				devc->cap.state = CAP_STATE_HALT;
+				break;
+			}
+			cap_sample_xfer_resubmit(xfer, devc);
+			devc->cap.timeout_counter++;
+			break;
+		}
+
+		devc->cap.timeout_counter = 0;
+
+		bytes_received = devc->cap.bytes_received + xfer->actual_length;
+
+		cap_data_send(sdi, xfer->buffer, xfer->actual_length);
+
+		devc->cap.bytes_received = bytes_received;
+		cap_sample_xfer_resubmit(xfer, devc);
+		break;
+	}
+}
+
+// static int cap_trigger_submit(const struct sr_dev_inst *sdi);
+
+// static void LIBUSB_CALL cap_trigger_event_handler(struct libusb_transfer *xfer)
+// {
+// 	const struct sr_dev_inst *sdi;
+// 	struct dev_context *devc;
+// 	struct trigger_status *tr;
+// 	int res;
+
+// 	sdi = xfer->user_data;
+// 	devc = sdi->priv;
+
+// 	switch (xfer->status) {
+// 	case LIBUSB_TRANSFER_COMPLETED:
+// 		tr = (struct trigger_status *)xfer->buffer;
+// 		if (tr->pos_real == 0) {
+// 			res = cap_trigger_submit(sdi);
+// 			if (res != SR_OK) {
+// 				devc->cap.wft_done = TRUE;
+// 				devc->cap.state = CAP_STATE_HALT;
+// 			}
+// 		}
+
+// 		break;
+// 	case LIBUSB_TRANSFER_CANCELLED:
+// 		devc->cap.wft_done = TRUE;
+// 		break;
+// 	default:
+// 		sr_err("Error waiting for trigger. Aborting session.");
+// 		devc->cap.wft_done = TRUE;
+// 		devc->cap.state = CAP_STATE_HALT;
+// 		break;
+// 	}
+// }
+
+/**
+ * Deletes the sample transfer pool only. Should terminate all transfers
+ * before calling this.
+ */
+static void cap_sample_xfer_fini(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	int i;
+
+	devc = sdi->priv;
+
+	if (devc->cap.data_xfers == NULL) {
+		devc->cap.state = CAP_STATE_INIT;
+		return;
+	}
+
+	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
+		g_free(devc->cap.data_xfers[i]->buffer);
+		libusb_free_transfer(devc->cap.data_xfers[i]);
+		devc->cap.data_xfers[i] = NULL;
+	}
+
+	g_free(devc->cap.data_xfers);
+	devc->cap.data_xfers = NULL;
+	devc->cap.state = CAP_STATE_INIT;
+}
+
+/**
+ * Allocates the sample transfer pool.
+ */
+static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	struct sr_usb_dev_inst *usb;
+	unsigned char *xfer_buf;
+	int i;
+
+	devc = sdi->priv;
+	usb = sdi->conn;
+
+	devc->cap.data_xfers = g_try_malloc0(sizeof(struct libusb_transfer *) *
+					     NUM_SIMUL_XFERS);
+	if (devc->cap.data_xfers == NULL) {
+		return SR_ERR_MALLOC;
+	}
+
+	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
+		xfer_buf = g_try_malloc0(devc->frame_size);
+		if (xfer_buf == NULL) {
+			cap_sample_xfer_fini(sdi);
+			return SR_ERR_MALLOC;
+		}
+		devc->cap.data_xfers[i] = libusb_alloc_transfer(0);
+		if (devc->cap.data_xfers[i] == NULL) {
+			g_free(xfer_buf);
+			cap_sample_xfer_fini(sdi);
+			return SR_ERR_MALLOC;
+		}
+		libusb_fill_bulk_transfer(devc->cap.data_xfers[i], usb->devhdl,
+					  LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE,
+					  xfer_buf, devc->frame_size,
+					  &cap_sample_xfer_event, (void *)sdi,
+					  FRAME_SIZE_MS * 1.5);
+	}
+
+	return SR_OK;
+}
+
+/**
+ * Fires all the transfers the sample transfer pool.
+ */
+static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	int i, ret;
+
+	devc = sdi->priv;
+	devc->cap.timeout_counter = 0;
+
+	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
+		ret = libusb_submit_transfer(devc->cap.data_xfers[i]);
+		if (ret != LIBUSB_SUCCESS) {
+			return SR_ERR;
+		}
+		devc->cap.n_active_data_xfers++;
+	}
+
+	return SR_OK;
+}
+
+/**
+ * Signal all the transfers to terminate themselves.
+ */
+static void cap_sample_xfer_end(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	uint32_t i;
+
+	devc = sdi->priv;
+
+	if (devc->cap.data_xfers == NULL)
+		return;
+
+	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
+		struct libusb_transfer *xfer = devc->cap.data_xfers[i];
+		if (xfer != NULL) {
+			libusb_cancel_transfer(xfer);
+		}
+	}
+}
+
+// static int cap_trigger_submit(const struct sr_dev_inst *sdi)
+// {
+// 	struct dev_context *devc;
+// 	struct sr_usb_dev_inst *usb;
+// 	unsigned char *ctrl_buf;
+// 	int res;
+
+// 	devc = sdi->priv;
+// 	usb = sdi->conn;
+
+// 	sr_spew("Waiting for trigger...");
+// 	devc->cap.wft_done = FALSE;
+
+// 	if (devc->cap.wft_xfer == NULL) {
+// 		devc->cap.wft_xfer = libusb_alloc_transfer(0);
+// 		if (devc->cap.wft_xfer == NULL) {
+// 			return SR_ERR_MALLOC;
+// 		}
+// 		ctrl_buf = g_malloc0(sizeof(struct trigger_status));
+// 	} else
+// 		ctrl_buf = devc->cap.wft_xfer->buffer;
+
+// 	libusb_fill_control_setup(
+// 		ctrl_buf, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN,
+// 		EP0_CMD_GET_TRIGGER_STATUS, 0x0000, 0x0000,
+// 		sizeof(struct trigger_status));
+// 	libusb_fill_control_transfer(devc->cap.wft_xfer, usb->devhdl, ctrl_buf,
+// 				     &cap_trigger_event_handler, (void *)sdi,
+// 				     POLL_TIMEOUT);
+
+// 	res = libusb_submit_transfer(devc->cap.wft_xfer);
+// 	if (res != LIBUSB_SUCCESS) {
+// 		sr_err("Failed to submit trigger control transfer: %s",
+// 		       libusb_error_name(res));
+// 		return SR_ERR_IO;
+// 	}
+
+// 	devc->cap.state = CAP_STATE_WAIT_TRIGGER;
+// 	return SR_OK;
+// }
+
+// static void cap_trigger_cleanup(const struct sr_dev_inst *sdi)
+// {
+// 	struct dev_context *devc;
+
+// 	devc = sdi->priv;
+
+// 	if (devc->cap.wft_xfer == NULL)
+// 		return;
+
+// 	g_free(devc->cap.wft_xfer->buffer);
+// 	libusb_free_transfer(devc->cap.wft_xfer);
+// 	devc->cap.wft_xfer = NULL;
+// }
+
+static int cap_top_event_handler(int fd, int revents, void *cb_data)
 {
 	const struct sr_dev_inst *sdi;
 	struct drv_context *drvc;
@@ -712,24 +1086,51 @@ static int handle_events(int fd, int revents, void *cb_data)
 	if (!devc || !drvc || !usb)
 		return TRUE;
 
+	/* libusb event handler. */
 	memset(&tv, 0, sizeof(tv));
 	libusb_handle_events_timeout_completed(drvc->sr_ctx->libusb_ctx, &tv,
 					       NULL);
 
-	/* Continue to wait for trigger condition if trigger hasn't been fired
-	   yet. */
-	if (!devc->triggered) {
+	switch (devc->cap.state) {
+	case CAP_STATE_WAIT_TRIGGER:
+		/* Continue to wait for trigger condition if trigger hasn't
+		   been fired yet. */
 		ep0_get_trigger_status(usb->devhdl, &status);
+		sr_spew("sample tick %" PRIu64, status.sample_offset);
 		if (status.pos_real != 0) {
 			sr_info("triggered after acquiring 0x%" PRIx64
-				"samples, point at 0x%" PRIx32 ", int trigger"
-				"status 0x%08" PRIx32,
+				" samples, point at 0x%" PRIx32 ", int trigger"
+				" status 0x%08" PRIx32 ". Transferring capture"
+				" state to SAMPLE_XFER",
 				status.sample_offset, status.pos_real,
 				status.activated);
-			devc->triggered = TRUE;
-			devc->trigger_point_real = status.pos_real;
-			fetch_samples(sdi);
+			devc->cap.state = CAP_STATE_SAMPLE_XFER;
+			devc->cap.trigger_point_real = status.pos_real;
+			std_session_send_df_header(sdi);
+			cap_sample_xfer_begin(sdi);
 		}
+		break;
+	case CAP_STATE_HALT:
+		cap_sample_xfer_end(sdi);
+		sr_info("%s: Transferring capture state to CLEANUP.", __func__);
+		devc->cap.state = CAP_STATE_CLEANUP;
+		break;
+	case CAP_STATE_CLEANUP:
+		/* Make sure all the transfers stop before proceeding. */
+		if (devc->cap.n_active_data_xfers == 0) {
+			cap_sample_xfer_fini(sdi);
+			/* Get rid of the trigger transfer object as well. */
+			//cap_trigger_cleanup(sdi);
+			cap_data_fini(sdi);
+			/* Safe to terminate the event loop. */
+			std_session_send_df_end(sdi);
+			usb_source_remove(sdi->session, sdi->session->ctx);
+			devc->cap.state = CAP_STATE_INIT;
+		}
+		break;
+	default:
+		/* Do nothing. */
+		break;
 	}
 
 	return TRUE;
@@ -1046,7 +1447,7 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	}
 
 	TRY_WRITE_REG(sdi, REG_ENABLED_NUM_CH, devc->channels.n);
-	//TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
+	TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
 	ret = convert_trigger(sdi);
 	if (ret != SR_OK) {
 		return ret;
@@ -1080,24 +1481,41 @@ SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi)
 		return res;
 	}
 
+	res = cap_sample_xfer_init(sdi);
+	if (res != SR_OK) {
+		return res;
+	}
+
+	res = cap_data_init(sdi);
+	if (res != SR_OK) {
+		cap_sample_xfer_fini(sdi);
+		return res;
+	}
+
+	res = write_reg(sdi, REG_STOP, 0);
+	if (res != SR_OK) {
+		cap_data_fini(sdi);
+		cap_sample_xfer_fini(sdi);
+		return res;
+	}
+
 	usb_source_add(sdi->session, sdi->session->ctx, POLL_TIMEOUT,
-		       handle_events, (void *)sdi);
+		       &cap_top_event_handler, (void *)sdi);
 
-	TRY_WRITE_REG(sdi, REG_STOP, 0);
+	sr_info("%s: Transferring capture state to WAIT_TRIGGER.", __func__);
+	devc->cap.state = CAP_STATE_WAIT_TRIGGER;
 
-	/* TODO error check */
+	return SR_OK;
 }
 
 SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	int res;
+
+	sr_info("%s: Transferring capture state to HALT.", __func__);
 
 	devc = sdi->priv;
-
-	/* TODO error check */
-	stop_fetch_samples(sdi);
-	usb_source_remove(sdi->session, sdi->session->ctx);
+	devc->cap.state = CAP_STATE_HALT;
 
 	return SR_OK;
 }
