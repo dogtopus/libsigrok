@@ -823,6 +823,7 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 
 	switch (xfer->status) {
 	case LIBUSB_TRANSFER_CANCELLED:
+		sr_spew("Transfer cancelled");
 		devc->cap.n_active_data_xfers--;
 		break;
 	case LIBUSB_TRANSFER_NO_DEVICE:
@@ -831,11 +832,19 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 	case LIBUSB_TRANSFER_STALL:
 		sr_err("Unrecoverable status %d. Aborting session.",
 		       xfer->status);
+		devc->cap.n_active_data_xfers--;
 		devc->cap.state = CAP_STATE_HALT;
 		break;
 	case LIBUSB_TRANSFER_TIMED_OUT:
 	case LIBUSB_TRANSFER_COMPLETED:
 		sr_spew("got %d bytes from sample FIFO", xfer->actual_length);
+
+		if (devc->cap.state != CAP_STATE_SAMPLE_XFER) {
+			/* Ignore data and wait for cancellation if not
+			 * receiving samples. */
+			devc->cap.n_active_data_xfers--;
+			break;
+		}
 
 		if (xfer->actual_length == 0) {
 			/* Timeout or we got 0 bytes. Make a note about this. */
@@ -857,6 +866,16 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 		cap_data_send(sdi, xfer->buffer, xfer->actual_length);
 
 		devc->cap.bytes_received = bytes_received;
+
+		if (devc->cap.bytes_received / devc->channels.n * 8 >=
+		    devc->limit_samples) {
+			sr_info("Got enough samples. Transferring capture "
+				"state to HALT.");
+			devc->cap.n_active_data_xfers--;
+			devc->cap.state = CAP_STATE_HALT;
+			break;
+		}
+
 		cap_sample_xfer_resubmit(xfer, devc);
 		break;
 	}
