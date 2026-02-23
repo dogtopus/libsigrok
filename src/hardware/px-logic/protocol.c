@@ -420,55 +420,6 @@ static int fwram_ep_tx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
 }
 
 /**
- * Receive data from the firmware RAM FIFO endpoint.
- * 
- * @param[in] sdi Device context.
- * @param[out] rx_buf Receive buffer.
- * @param[in] rx_len Amount of bytes to receive. If 0, clears the STALL
- * condition on the endpoint and immediately return.
- *
- * @retval SR_OK Success.
- * @retval SR_ERR_IO Failed to transmit or receive data.
- * @retval SR_ERR_TIMEOUT Timeout.
- */
-static int fwram_ep_rx(const struct sr_dev_inst *sdi, uint8_t *rx_buf,
-		       uint32_t rx_len)
-{
-	struct sr_usb_dev_inst *usb;
-	int xfer_result, xfer_count;
-
-	usb = sdi->conn;
-
-	if (rx_len == 0) {
-		libusb_clear_halt(usb->devhdl,
-				  LIBUSB_ENDPOINT_IN | EP_FIFO_FWRAM);
-		return SR_OK;
-	}
-
-	xfer_result = libusb_bulk_transfer(usb->devhdl,
-					   LIBUSB_ENDPOINT_IN | EP_FIFO_FWRAM,
-					   rx_buf, rx_len, &xfer_count,
-					   REQ_TIMEOUT);
-
-	if (xfer_result != LIBUSB_SUCCESS)
-		sr_err("Failed to receive data from EP_FIFO_FWRAM: %s.",
-		       libusb_error_name(xfer_result));
-
-	if (xfer_result == LIBUSB_ERROR_TIMEOUT)
-		return SR_ERR_TIMEOUT;
-	else if (xfer_result != LIBUSB_SUCCESS)
-		return SR_ERR_IO;
-
-	if ((uint32_t)(xfer_count & 0x7fffffff) != rx_len) {
-		sr_err("Incomplete data received from EP_FIFO_FWRAM: expecting %dB, actually sent %dB.",
-		       rx_len, xfer_count);
-		return SR_ERR_IO;
-	}
-
-	return SR_OK;
-}
-
-/**
  * Read control register.
  * 
  * @param[in] sdi Device context.
@@ -875,41 +826,6 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 	}
 }
 
-// static int cap_trigger_submit(const struct sr_dev_inst *sdi);
-
-// static void LIBUSB_CALL cap_trigger_event_handler(struct libusb_transfer *xfer)
-// {
-// 	const struct sr_dev_inst *sdi;
-// 	struct dev_context *devc;
-// 	struct trigger_status *tr;
-// 	int res;
-
-// 	sdi = xfer->user_data;
-// 	devc = sdi->priv;
-
-// 	switch (xfer->status) {
-// 	case LIBUSB_TRANSFER_COMPLETED:
-// 		tr = (struct trigger_status *)xfer->buffer;
-// 		if (tr->pos_real == 0) {
-// 			res = cap_trigger_submit(sdi);
-// 			if (res != SR_OK) {
-// 				devc->cap.wft_done = TRUE;
-// 				devc->cap.state = CAP_STATE_HALT;
-// 			}
-// 		}
-
-// 		break;
-// 	case LIBUSB_TRANSFER_CANCELLED:
-// 		devc->cap.wft_done = TRUE;
-// 		break;
-// 	default:
-// 		sr_err("Error waiting for trigger. Aborting session.");
-// 		devc->cap.wft_done = TRUE;
-// 		devc->cap.state = CAP_STATE_HALT;
-// 		break;
-// 	}
-// }
-
 /**
  * Deletes the sample transfer pool only. Should terminate all transfers
  * before calling this.
@@ -1020,61 +936,6 @@ static void cap_sample_xfer_end(const struct sr_dev_inst *sdi)
 		}
 	}
 }
-
-// static int cap_trigger_submit(const struct sr_dev_inst *sdi)
-// {
-// 	struct dev_context *devc;
-// 	struct sr_usb_dev_inst *usb;
-// 	unsigned char *ctrl_buf;
-// 	int res;
-
-// 	devc = sdi->priv;
-// 	usb = sdi->conn;
-
-// 	sr_spew("Waiting for trigger...");
-// 	devc->cap.wft_done = FALSE;
-
-// 	if (devc->cap.wft_xfer == NULL) {
-// 		devc->cap.wft_xfer = libusb_alloc_transfer(0);
-// 		if (devc->cap.wft_xfer == NULL) {
-// 			return SR_ERR_MALLOC;
-// 		}
-// 		ctrl_buf = g_malloc0(sizeof(struct trigger_status));
-// 	} else
-// 		ctrl_buf = devc->cap.wft_xfer->buffer;
-
-// 	libusb_fill_control_setup(
-// 		ctrl_buf, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN,
-// 		EP0_CMD_GET_TRIGGER_STATUS, 0x0000, 0x0000,
-// 		sizeof(struct trigger_status));
-// 	libusb_fill_control_transfer(devc->cap.wft_xfer, usb->devhdl, ctrl_buf,
-// 				     &cap_trigger_event_handler, (void *)sdi,
-// 				     POLL_TIMEOUT);
-
-// 	res = libusb_submit_transfer(devc->cap.wft_xfer);
-// 	if (res != LIBUSB_SUCCESS) {
-// 		sr_err("Failed to submit trigger control transfer: %s",
-// 		       libusb_error_name(res));
-// 		return SR_ERR_IO;
-// 	}
-
-// 	devc->cap.state = CAP_STATE_WAIT_TRIGGER;
-// 	return SR_OK;
-// }
-
-// static void cap_trigger_cleanup(const struct sr_dev_inst *sdi)
-// {
-// 	struct dev_context *devc;
-
-// 	devc = sdi->priv;
-
-// 	if (devc->cap.wft_xfer == NULL)
-// 		return;
-
-// 	g_free(devc->cap.wft_xfer->buffer);
-// 	libusb_free_transfer(devc->cap.wft_xfer);
-// 	devc->cap.wft_xfer = NULL;
-// }
 
 static int cap_top_event_handler(int fd, int revents, void *cb_data)
 {
@@ -1284,7 +1145,6 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	int res;
 	uint32_t pwm_vref_period, pwm_vref_duty, clk_conf, clk_div, mode,
 		num_samples_lo, num_samples_hi;
 	double pwm_vref_freq, io_vref;
@@ -1423,7 +1283,7 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	TRY_WRITE_REG(sdi, REG_PWM1_CMP_DUTY, 0);
 
 	/* Clear the BLOCK_START register. */
-	TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
+	// TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
 
 	/* Set input reference voltage. */
 	ret = set_vref(sdi);
@@ -1530,26 +1390,4 @@ SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi)
 	devc->cap.state = CAP_STATE_HALT;
 
 	return SR_OK;
-}
-
-SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data)
-{
-	const struct sr_dev_inst *sdi;
-	struct dev_context *devc;
-
-	(void)fd;
-
-	sdi = cb_data;
-	if (!sdi)
-		return TRUE;
-
-	devc = sdi->priv;
-	if (!devc)
-		return TRUE;
-
-	if (revents == G_IO_IN) {
-		/* TODO */
-	}
-
-	return TRUE;
 }

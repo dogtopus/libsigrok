@@ -142,6 +142,5 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi);
-SR_PRIV int px_logic_receive_data(int fd, int revents, void *cb_data);
 
 #endif
