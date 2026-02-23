@@ -124,27 +124,7 @@ static const uint64_t clk_conf_table[CLK_NUM_SUPPORTED] = {
 	[CLK_200MHZ] = SR_MHZ(200), [CLK_100MHZ] = SR_MHZ(100),
 };
 
-static int ep0_get_trigger_status(libusb_device_handle *devhdl,
-				  struct trigger_status *status)
-{
-	int ret;
-
-	ret = libusb_control_transfer(
-		devhdl, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN,
-		EP0_CMD_GET_TRIGGER_STATUS, 0x0000, 0x0000,
-		(unsigned char *)status, sizeof(struct trigger_status),
-		POLL_TIMEOUT / 2);
-
-	if (ret < 0) {
-		sr_err("Unable to get trigger status: %s.",
-		       libusb_error_name(ret));
-		return SR_ERR;
-	}
-
-	return SR_OK;
-}
-
-static int convert_trigger(const struct sr_dev_inst *sdi)
+static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	struct sr_trigger *trigger;
@@ -302,6 +282,26 @@ static size_t cap_transpose_samples(const uint8_t *src, size_t length,
 
 	sr_spew("Transposed %zu samples", out_samples);
 	return out_samples;
+}
+
+static int ep0_get_trigger_status(libusb_device_handle *devhdl,
+				  struct trigger_status *status)
+{
+	int ret;
+
+	ret = libusb_control_transfer(
+		devhdl, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN,
+		EP0_CMD_GET_TRIGGER_STATUS, 0x0000, 0x0000,
+		(unsigned char *)status, sizeof(struct trigger_status),
+		POLL_TIMEOUT / 2);
+
+	if (ret < 0) {
+		sr_err("Unable to get trigger status: %s.",
+		       libusb_error_name(ret));
+		return SR_ERR;
+	}
+
+	return SR_OK;
 }
 
 /**
@@ -514,8 +514,8 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 			return res;                   \
 	}
 
-static int upload_bitstream_to_fpga(const struct sr_dev_inst *sdi,
-				    const char *bitstream_name)
+static int fpga_program(const struct sr_dev_inst *sdi,
+			const char *bitstream_name)
 {
 	struct sr_resource bitstream;
 	struct drv_context *drvc;
@@ -599,7 +599,7 @@ static gboolean fpga_reg_sanity_check(const struct sr_dev_inst *sdi)
 	return TRUE;
 }
 
-static int set_vref(const struct sr_dev_inst *sdi)
+static int conf_set_vref(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	uint32_t period, duty;
@@ -617,7 +617,7 @@ static int set_vref(const struct sr_dev_inst *sdi)
 }
 
 static struct channel_config
-compute_channel_config(const struct sr_dev_inst *sdi)
+conf_compute_channel_config(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	struct sr_channel *channel;
@@ -639,8 +639,8 @@ compute_channel_config(const struct sr_dev_inst *sdi)
 	return res;
 }
 
-static uint32_t compute_frame_size(enum libusb_speed speed, uint64_t samplerate,
-				   uint32_t nchannels)
+static uint32_t conf_compute_frame_size(enum libusb_speed speed,
+					uint64_t samplerate, uint32_t nchannels)
 {
 	uint32_t max, typical, final;
 
@@ -655,7 +655,7 @@ static uint32_t compute_frame_size(enum libusb_speed speed, uint64_t samplerate,
 	return final;
 }
 
-static int config_sampler_clock(const struct sr_dev_inst *sdi)
+static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	uint32_t clk_conf, clk_div;
@@ -1038,11 +1038,11 @@ SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi)
 
 	sr_info("Initializing FPGA...");
 
-	res = upload_bitstream_to_fpga(sdi, FPGA_STAGE1_NAME);
+	res = fpga_program(sdi, FPGA_STAGE1_NAME);
 	if (res != SR_OK)
 		return res;
 
-	res = upload_bitstream_to_fpga(sdi, FPGA_STAGE2_NAME);
+	res = fpga_program(sdi, FPGA_STAGE2_NAME);
 	if (res != SR_OK)
 		return res;
 
@@ -1269,8 +1269,8 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 
 	devc = sdi->priv;
 
-	devc->channels = compute_channel_config(sdi);
-	devc->frame_size = compute_frame_size(
+	devc->channels = conf_compute_channel_config(sdi);
+	devc->frame_size = conf_compute_frame_size(
 		devc->config.speed, devc->samplerate, devc->channels.n);
 
 	/* Disable PWM channels as we are not supporting them for now. */
@@ -1286,7 +1286,7 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	// TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
 
 	/* Set input reference voltage. */
-	ret = set_vref(sdi);
+	ret = conf_set_vref(sdi);
 	if (ret != SR_OK) {
 		return ret;
 	}
@@ -1313,14 +1313,14 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	TRY_WRITE_REG(sdi, REG_TRIG_EXT_MODE, 0);
 	TRY_WRITE_REG(sdi, REG_TRIG_OUT_EN, 0);
 
-	ret = config_sampler_clock(sdi);
+	ret = conf_config_sampler_clock(sdi);
 	if (ret != SR_OK) {
 		return ret;
 	}
 
 	TRY_WRITE_REG(sdi, REG_ENABLED_NUM_CH, devc->channels.n);
 	TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
-	ret = convert_trigger(sdi);
+	ret = conf_convert_trigger(sdi);
 	if (ret != SR_OK) {
 		return ret;
 	}
