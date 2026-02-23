@@ -106,8 +106,6 @@ struct capture_state {
 	struct sr_datafeed_packet packet;
 	uint8_t *xpose_buffer;
 	size_t xpose_buffer_size;
-
-	int timeout_counter;
 	//gboolean wft_done;
 };
 

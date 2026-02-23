@@ -105,6 +105,7 @@
 #define PWM_CONF_MASK_EN (1 << 0)
 
 #define ALIGN_4K(x) ((x / 4096 + 1) * 4096)
+#define ALIGN_CH(x, ch) ((x / (4096 * ch) + 1) * (4096 * ch))
 
 #define MCU_FW_NAME "SCI_LOGIC.bin"
 #define FPGA_STAGE1_NAME "hspi_ddr_RST.bin"
@@ -697,7 +698,7 @@ static uint32_t compute_frame_size(enum libusb_speed speed, uint64_t samplerate,
 
 	typical = (samplerate * nchannels) / 8 / (1000 / FRAME_SIZE_MS);
 
-	final = MIN(max, typical) / 4096 / nchannels * 4096 * nchannels;
+	final = ALIGN_CH(MIN(max, typical), nchannels);
 	sr_spew("Computed frame size is %u bytes", final);
 
 	return final;
@@ -847,19 +848,12 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 		}
 
 		if (xfer->actual_length == 0) {
-			/* Timeout or we got 0 bytes. Make a note about this. */
-			if (devc->cap.timeout_counter >= 10) {
-				sr_err("Device stopped responding. Aborting "
-				       "session.");
-				devc->cap.state = CAP_STATE_HALT;
-				break;
-			}
+			/* Timeout/0 bytes received could indicate that the
+			 * device is still waiting for captured data. It's safe
+			 * to just resubmit the transfer. */
 			cap_sample_xfer_resubmit(xfer, devc);
-			devc->cap.timeout_counter++;
 			break;
 		}
-
-		devc->cap.timeout_counter = 0;
 
 		bytes_received = devc->cap.bytes_received + xfer->actual_length;
 
@@ -941,6 +935,7 @@ static void cap_sample_xfer_fini(const struct sr_dev_inst *sdi)
 	g_free(devc->cap.data_xfers);
 	devc->cap.data_xfers = NULL;
 	devc->cap.state = CAP_STATE_INIT;
+	devc->cap.bytes_received = 0;
 }
 
 /**
@@ -978,7 +973,7 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 					  LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE,
 					  xfer_buf, devc->frame_size,
 					  &cap_sample_xfer_event, (void *)sdi,
-					  FRAME_SIZE_MS * 1.5);
+					  FRAME_SIZE_MS * 2);
 	}
 
 	return SR_OK;
@@ -993,7 +988,6 @@ static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
 	int i, ret;
 
 	devc = sdi->priv;
-	devc->cap.timeout_counter = 0;
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
 		ret = libusb_submit_transfer(devc->cap.data_xfers[i]);
@@ -1144,7 +1138,6 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 			/* Safe to terminate the event loop. */
 			std_session_send_df_end(sdi);
 			usb_source_remove(sdi->session, sdi->session->ctx);
-			devc->cap.state = CAP_STATE_INIT;
 		}
 		break;
 	default:
