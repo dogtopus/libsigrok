@@ -67,7 +67,7 @@ struct dev_config {
 	enum libusb_speed speed;
 
 	enum device_variant variant;
-	uint64_t buffer_depth;
+	uint64_t max_buffer_depth;
 	/** Number of total channels the device supports (16 or 32). */
 	uint8_t channels;
 	/** Sample width in bytes (2 or 4). */
@@ -125,7 +125,7 @@ struct dev_context {
 	struct pwm_config pwm[1];
 
 	/* Values derived from properties. */
-	uint32_t frame_size;
+	uint32_t buf_size;
 	struct channel_config channels;
 
 	struct sr_channel_group *cg_logic;

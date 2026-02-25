@@ -21,12 +21,12 @@
 #include <strings.h>
 #include "protocol.h"
 
-#define FRAME_SIZE_MS 10
+#define BUF_SIZE_MS 10
 
-#define POLL_TIMEOUT FRAME_SIZE_MS
+#define POLL_TIMEOUT BUF_SIZE_MS
 #define REQ_TIMEOUT 1000
-#define FPGA_DELAY_UNIT_US 10000
-#define FPGA_SANITY_MAX_RECHECK 200
+#define FPGA_CHECK_PERIOD_US 10000
+#define FPGA_CHECK_COUNT 200
 
 #define NUM_SIMUL_XFERS 32
 
@@ -37,9 +37,9 @@
 #define FPGA_INPUT_VDIV (1.0 / 2.0)
 
 /* 4MiB */
-#define MAX_FRAME_SIZE_SS (4 * 1024 * 1024)
+#define MAX_BUF_SIZE_SS (4 * 1024 * 1024)
 /* 4.8Mbit */
-#define MAX_FRAME_SIZE_HS (4800000 / 8)
+#define MAX_BUF_SIZE_HS (4800000 / 8)
 #define MAX_TRIG_PERCENT 90
 
 #define STRIPE_SIZE_BYTES sizeof(uint64_t)
@@ -62,7 +62,7 @@
 #define REG_CHANNEL_EN 0x0010
 #define REG_CLK_CONF 0x0014
 #define REG_CLK_DIV 0x0018
-#define REG_SAMPLE_FRAME_SIZE 0x001c
+#define REG_SAMPLE_BUFFER_SIZE 0x001c
 #define REG_STOP 0x0020
 #define REG_TRIG_LOW 0x0024
 #define REG_TRIG_HIGH 0x0028
@@ -77,7 +77,7 @@
 #define REG_PWM1_CMP_DUTY 0x0054
 #define REG_TRIG_OUT_EN 0x0058
 
-#define REG_XFER_FRAME_SIZE 0x2008
+#define REG_XFER_BUFFER_SIZE 0x2008
 #define REG_FWRAM_READ_START 0x200c
 #define REG_FWRAM_READ_END 0x2010
 #define REG_FWRAM_READ_PAGE 0x2014
@@ -148,13 +148,13 @@ static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 		depth_per_channel = 0;
 	else
 		depth_per_channel =
-			(devc->config.buffer_depth / devc->channels.n) &
+			(devc->config.max_buffer_depth / devc->channels.n) &
 			0xfffffc00;
 
 	max_trigger_percent = devc->streaming ? 10 : MAX_TRIG_PERCENT;
 
 	trigger_point = MAX(STRIPE_SIZE_BYTES,
-			    devc->capture_ratio / 100 * devc->limit_samples);
+			    devc->capture_ratio * devc->limit_samples / 100);
 	trigger_point = MIN(depth_per_channel * max_trigger_percent / 100,
 			    trigger_point);
 
@@ -250,7 +250,7 @@ static size_t cap_transpose_samples(const uint8_t *src, size_t length,
 	out_ptr = dst_ptr;
 	out_samples = 0;
 
-	/* Process one 64-sample group of all channels at a time. */
+	/* Process one frame at a time. */
 	for (src_ptr = src; src_ptr < end_ptr; src_ptr += stripes_step) {
 		stripe_ptr = src_ptr;
 		/* TODO: use ctz + bit clear here may be better. */
@@ -639,18 +639,17 @@ conf_compute_channel_config(const struct sr_dev_inst *sdi)
 	return res;
 }
 
-static uint32_t conf_compute_frame_size(enum libusb_speed speed,
-					uint64_t samplerate, uint32_t nchannels)
+static uint32_t conf_compute_buf_size(enum libusb_speed speed,
+				      uint64_t samplerate, uint32_t nchannels)
 {
 	uint32_t max, typical, final;
 
-	max = speed == LIBUSB_SPEED_SUPER ? MAX_FRAME_SIZE_SS :
-					    MAX_FRAME_SIZE_HS;
+	max = speed == LIBUSB_SPEED_SUPER ? MAX_BUF_SIZE_SS : MAX_BUF_SIZE_HS;
 
-	typical = (samplerate * nchannels) / 8 / (1000 / FRAME_SIZE_MS);
+	typical = (samplerate * nchannels) / 8 / (1000 / BUF_SIZE_MS);
 
 	final = ALIGN_CH(MIN(max, typical), nchannels);
-	sr_spew("Computed frame size is %u bytes", final);
+	sr_spew("Computed buffer size is %u bytes", final);
 
 	return final;
 }
@@ -701,7 +700,7 @@ static int cap_data_init(const struct sr_dev_inst *sdi)
 	struct dev_context *devc;
 	devc = sdi->priv;
 
-	devc->cap.xpose_buffer_size = devc->frame_size / devc->channels.n * 8 *
+	devc->cap.xpose_buffer_size = devc->buf_size / devc->channels.n * 8 *
 				      devc->config.sample_width;
 	sr_spew("%s: Allocating %zu bytes for transpose buffer", __func__,
 		devc->cap.xpose_buffer_size);
@@ -874,7 +873,7 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 	}
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
-		xfer_buf = g_try_malloc0(devc->frame_size);
+		xfer_buf = g_try_malloc0(devc->buf_size);
 		if (xfer_buf == NULL) {
 			cap_sample_xfer_fini(sdi);
 			return SR_ERR_MALLOC;
@@ -887,9 +886,9 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 		}
 		libusb_fill_bulk_transfer(devc->cap.data_xfers[i], usb->devhdl,
 					  LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE,
-					  xfer_buf, devc->frame_size,
+					  xfer_buf, devc->buf_size,
 					  &cap_sample_xfer_event, (void *)sdi,
-					  FRAME_SIZE_MS * 2);
+					  BUF_SIZE_MS * 2);
 	}
 
 	return SR_OK;
@@ -1048,13 +1047,12 @@ SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi)
 
 	res = SR_ERR_TIMEOUT;
 	/* Wait until FPGA is fully configured. */
-	for (fail_count = 0; fail_count < FPGA_SANITY_MAX_RECHECK;
-	     fail_count++) {
+	for (fail_count = 0; fail_count < FPGA_CHECK_COUNT; fail_count++) {
 		if (fpga_reg_sanity_check(sdi)) {
 			res = SR_OK;
 			break;
 		}
-		g_usleep(FPGA_DELAY_UNIT_US);
+		g_usleep(FPGA_CHECK_PERIOD_US);
 	}
 
 	if (res == SR_ERR_TIMEOUT)
@@ -1270,7 +1268,7 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	devc = sdi->priv;
 
 	devc->channels = conf_compute_channel_config(sdi);
-	devc->frame_size = conf_compute_frame_size(
+	devc->buf_size = conf_compute_buf_size(
 		devc->config.speed, devc->samplerate, devc->channels.n);
 
 	/* Disable PWM channels as we are not supporting them for now. */
@@ -1281,9 +1279,6 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	TRY_WRITE_REG(sdi, REG_PWM1_CONF, 0);
 	TRY_WRITE_REG(sdi, REG_PWM1_CMP_PERIOD, 0);
 	TRY_WRITE_REG(sdi, REG_PWM1_CMP_DUTY, 0);
-
-	/* Clear the BLOCK_START register. */
-	// TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
 
 	/* Set input reference voltage. */
 	ret = conf_set_vref(sdi);
@@ -1303,8 +1298,8 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 
 	TRY_WRITE_REG(sdi, REG_STOP, 0xffffffff);
 
-	TRY_WRITE_REG(sdi, REG_SAMPLE_FRAME_SIZE, devc->frame_size);
-	TRY_WRITE_REG(sdi, REG_XFER_FRAME_SIZE, devc->frame_size);
+	TRY_WRITE_REG(sdi, REG_SAMPLE_BUFFER_SIZE, devc->buf_size);
+	TRY_WRITE_REG(sdi, REG_XFER_BUFFER_SIZE, devc->buf_size);
 
 	TRY_WRITE_REG(sdi, REG_NUM_SAMPLES_LO,
 		      devc->limit_samples & 0xffffffff);
@@ -1319,7 +1314,10 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	}
 
 	TRY_WRITE_REG(sdi, REG_ENABLED_NUM_CH, devc->channels.n);
+
+	/* Clear the BLOCK_START register. */
 	TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
+
 	ret = conf_convert_trigger(sdi);
 	if (ret != SR_OK) {
 		return ret;

@@ -223,7 +223,7 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 		}
 		sdi->model = g_strdup(variant_names[variant]);
 
-		devc->config.buffer_depth = variant_depth[variant];
+		devc->config.max_buffer_depth = variant_depth[variant];
 
 		ch_offset = 0;
 
@@ -385,8 +385,6 @@ static int dev_open(struct sr_dev_inst *sdi)
 	int ret;
 
 	usb = sdi->conn;
-
-	/* TODO: get handle from sdi->conn and open it. */
 
 	ret = px_logic_dev_open(sdi);
 	if (ret != SR_OK) {
