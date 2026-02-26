@@ -884,7 +884,7 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 					  LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE,
 					  xfer_buf, devc->buf_size,
 					  &cap_sample_xfer_event, (void *)sdi,
-					  BUF_SIZE_MS * 2);
+					  BUF_SIZE_MS * NUM_SIMUL_XFERS);
 	}
 
 	return SR_OK;
