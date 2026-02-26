@@ -880,11 +880,11 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 			cap_sample_xfer_fini(sdi);
 			return SR_ERR_MALLOC;
 		}
-		libusb_fill_bulk_transfer(devc->cap.data_xfers[i], usb->devhdl,
-					  LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE,
-					  xfer_buf, devc->buf_size,
-					  &cap_sample_xfer_event, (void *)sdi,
-					  BUF_SIZE_MS * NUM_SIMUL_XFERS);
+		libusb_fill_bulk_transfer(
+			devc->cap.data_xfers[i], usb->devhdl,
+			LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE, xfer_buf,
+			devc->buf_size, &cap_sample_xfer_event, (void *)sdi,
+			BUF_SIZE_MS * NUM_SIMUL_XFERS * 5 / 4);
 	}
 
 	return SR_OK;
