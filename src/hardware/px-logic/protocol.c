@@ -194,17 +194,6 @@ static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-static inline void write_bit_le(uint8_t *dest, uint8_t bitpos, int bit)
-{
-	const size_t offset = bitpos / 8;
-	const size_t mask = 1 << (bitpos % 8);
-
-	if (bit)
-		dest[offset] |= mask;
-	else
-		dest[offset] &= ~mask;
-}
-
 /**
  * Transpose the DSLogic-style samples (striped channels) to sigrok-style
  * (bitfield samples padded to bytes).
@@ -238,20 +227,26 @@ static size_t cap_transpose_samples(const uint8_t *src, size_t length,
 				    size_t sample_width_bytes)
 {
 	const uint8_t *const end_ptr = src + length;
-	const size_t stripes_step = channel_count * STRIPE_SIZE_BYTES;
 	const size_t sample_width_bits = sample_width_bytes * 8;
+	/* Only active channels will have stripes of data available. */
+	const size_t in_frame_size = channel_count * STRIPE_SIZE_BYTES;
+	/* 64 converted samples, each 2 or 4 bytes in size. */
+	const size_t out_frame_size = STRIPE_SIZE_BITS * sample_width_bytes;
 
 	const uint8_t *src_ptr, *stripe_ptr;
-	uint8_t *out_ptr;
-	uint8_t s_pos, channel;
+	uint8_t *out_ptr, *out_sample_ptr;
+	uint8_t channel;
 	uint64_t stripe;
-	size_t out_samples;
+	size_t out_samples, out_size;
 
 	out_ptr = dst_ptr;
 	out_samples = 0;
 
+	out_size = out_frame_size * length / in_frame_size;
+	memset(dst_ptr, 0, out_size);
+
 	/* Process one frame at a time. */
-	for (src_ptr = src; src_ptr < end_ptr; src_ptr += stripes_step) {
+	for (src_ptr = src; src_ptr < end_ptr; src_ptr += in_frame_size) {
 		stripe_ptr = src_ptr;
 		/* TODO: use ctz + bit clear here may be better. */
 		for (channel = 0; channel < sample_width_bits; channel++) {
@@ -266,17 +261,18 @@ static size_t cap_transpose_samples(const uint8_t *src, size_t length,
 
 			/* Write the stripe as a column on the output sample
 			 * matrix. */
-			for (s_pos = 0; s_pos < STRIPE_SIZE_BITS; s_pos++) {
-				write_bit_le(
-					&out_ptr[sample_width_bytes * s_pos],
-					channel, !!(stripe & (1 << s_pos)));
+			for (out_sample_ptr = out_ptr; stripe != 0;
+			     out_sample_ptr += sample_width_bytes) {
+				if (stripe & 1)
+					out_sample_ptr[channel / 8] |=
+						1 << (channel % 8);
+				stripe >>= 1;
 			}
 
 			stripe_ptr += STRIPE_SIZE_BYTES;
 		}
 
-		/* 64 converted samples, each 2 or 4 bytes in size. */
-		out_ptr += STRIPE_SIZE_BITS * sample_width_bytes;
+		out_ptr += out_frame_size;
 		out_samples += STRIPE_SIZE_BITS;
 	}
 
