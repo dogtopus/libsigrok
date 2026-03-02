@@ -284,11 +284,14 @@ static int ep0_get_trigger_status(libusb_device_handle *devhdl,
 				  struct trigger_status *status)
 {
 	int ret;
+	uint8_t trx[16];
+
+	memset(trx, 0, sizeof(trx));
 
 	ret = libusb_control_transfer(
 		devhdl, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN,
 		EP0_CMD_GET_TRIGGER_STATUS, 0x0000, 0x0000,
-		(unsigned char *)status, sizeof(struct trigger_status),
+		trx, sizeof(trx),
 		POLL_TIMEOUT / 2);
 
 	if (ret < 0) {
@@ -296,6 +299,10 @@ static int ep0_get_trigger_status(libusb_device_handle *devhdl,
 		       libusb_error_name(ret));
 		return SR_ERR;
 	}
+
+	status->sample_offset = RL64(&trx[0]);
+	status->activated = RL32(&trx[8]);
+	status->pos_real = RL32(&trx[12]);
 
 	return SR_OK;
 }
