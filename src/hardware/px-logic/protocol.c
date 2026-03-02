@@ -718,10 +718,33 @@ static int cap_data_init(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	size_t tr_pool_size;
-	devc = sdi->priv;
+	int8_t max_enabled_channel, i;
+	uint32_t mask;
 
-	devc->cap.tr_buffer_size = devc->buf_size / devc->channels.n * 8 *
-				   devc->config.sample_width;
+	devc = sdi->priv;
+	max_enabled_channel = -1;
+
+	for (mask = devc->channels.mask, i = 0; i < 32 && mask != 0;
+	     mask >>= 1, i++) {
+		if (mask & 1) {
+			max_enabled_channel = i;
+		}
+	}
+
+	if (max_enabled_channel < 8)
+		devc->cap.sample_width = 1;
+	else if (max_enabled_channel >= 8 && max_enabled_channel < 16)
+		devc->cap.sample_width = 2;
+	else if (max_enabled_channel >= 16 && max_enabled_channel < 24)
+		devc->cap.sample_width = 3;
+	else
+		devc->cap.sample_width = 4;
+
+	sr_info("Highest channel is %d", max_enabled_channel);
+	sr_info("Use sample width of %u", devc->cap.sample_width);
+
+	devc->cap.tr_buffer_size =
+		devc->buf_size / devc->channels.n * 8 * devc->cap.sample_width;
 	tr_pool_size = devc->cap.tr_buffer_size * NUM_SIMUL_XFERS;
 
 	sr_spew("%s: Allocating %zu bytes for transpose buffer", __func__,
@@ -870,14 +893,14 @@ static void xfer_sample_transpose_worker(gpointer data, gpointer user_data)
 	size_t samples;
 
 	samples = cap_transpose_samples(xfer->buffer, xfer->actual_length,
-					devc->cap.tr_buffer, devc->channels.n,
-					devc->channels.mask,
-					devc->config.sample_width);
+					xfer_user_data->tr_buffer,
+					devc->channels.n, devc->channels.mask,
+					devc->cap.sample_width);
 
 	xfer_user_data->packet.type = SR_DF_LOGIC;
 	xfer_user_data->packet.payload = &xfer_user_data->logic;
-	xfer_user_data->logic.length = samples * devc->config.sample_width;
-	xfer_user_data->logic.unitsize = devc->config.sample_width;
+	xfer_user_data->logic.length = samples * devc->cap.sample_width;
+	xfer_user_data->logic.unitsize = devc->cap.sample_width;
 	xfer_user_data->logic.data = xfer_user_data->tr_buffer;
 
 	g_async_queue_push_sorted(devc->cap.tr_out_queue, xfer,

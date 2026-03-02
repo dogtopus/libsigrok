@@ -232,7 +232,6 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 		devc->cg_logic = cg;
 
 		devc->config.channels = variant_logic_channels[variant];
-		devc->config.sample_width = devc->config.channels / 8;
 
 		for (i = 0; i < variant_logic_channels[variant]; i++) {
 			g_snprintf(name, sizeof(name) - 1, "%d", i);

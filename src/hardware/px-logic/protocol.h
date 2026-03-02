@@ -70,8 +70,6 @@ struct dev_config {
 	uint64_t max_buffer_depth;
 	/** Number of total channels the device supports (16 or 32). */
 	uint8_t channels;
-	/** Sample width in bytes (2 or 4). */
-	uint8_t sample_width;
 };
 
 struct pwm_config {
@@ -96,9 +94,10 @@ struct trigger_config {
 struct capture_state {
 	enum cap_state state;
 	uint32_t trigger_point_real;
+	uint8_t sample_width;
 
-	struct libusb_transfer **data_xfers;
 	uint8_t n_active_data_xfers;
+	struct libusb_transfer **data_xfers;
 	uint64_t bytes_received;
 	uint64_t recv_seq;
 	uint64_t send_seq;
