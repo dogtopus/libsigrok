@@ -29,6 +29,7 @@
 #define FPGA_CHECK_COUNT 200
 
 #define NUM_SIMUL_XFERS 32
+#define NUM_TRANSPOSE_WORKERS 4
 
 #define FPGA_VCCIO (3.334)
 #define FPGA_F_PWM_VREF SR_MHZ(120)
@@ -115,6 +116,14 @@ struct trigger_status {
 	uint64_t sample_offset;
 	uint32_t activated;
 	uint32_t pos_real;
+};
+
+struct sample_xfer_user_data {
+	const struct sr_dev_inst *sdi;
+	uint64_t seq;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_logic logic;
+	uint8_t *tr_buffer;
 };
 
 static const uint64_t clk_conf_table[CLK_NUM_SUPPORTED] = {
@@ -275,8 +284,6 @@ static size_t cap_transpose_samples(const uint8_t *src, size_t length,
 		out_ptr += out_frame_size;
 		out_samples += STRIPE_SIZE_BITS;
 	}
-
-	sr_spew("Transposed %zu samples", out_samples);
 	return out_samples;
 }
 
@@ -290,8 +297,7 @@ static int ep0_get_trigger_status(libusb_device_handle *devhdl,
 
 	ret = libusb_control_transfer(
 		devhdl, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN,
-		EP0_CMD_GET_TRIGGER_STATUS, 0x0000, 0x0000,
-		trx, sizeof(trx),
+		EP0_CMD_GET_TRIGGER_STATUS, 0x0000, 0x0000, trx, sizeof(trx),
 		POLL_TIMEOUT / 2);
 
 	if (ret < 0) {
@@ -698,19 +704,42 @@ static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+static void xfer_sample_transpose_worker(gpointer data, gpointer user_data);
+
+static void cap_halt(struct dev_context *devc)
+{
+	if (devc->cap.state != CAP_STATE_HALT &&
+	    devc->cap.state != CAP_STATE_CLEANUP &&
+	    devc->cap.state != CAP_STATE_INIT)
+		devc->cap.state = CAP_STATE_HALT;
+}
+
 static int cap_data_init(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
+	size_t tr_pool_size;
 	devc = sdi->priv;
 
-	devc->cap.xpose_buffer_size = devc->buf_size / devc->channels.n * 8 *
-				      devc->config.sample_width;
+	devc->cap.tr_buffer_size = devc->buf_size / devc->channels.n * 8 *
+				   devc->config.sample_width;
+	tr_pool_size = devc->cap.tr_buffer_size * NUM_SIMUL_XFERS;
+
 	sr_spew("%s: Allocating %zu bytes for transpose buffer", __func__,
-		devc->cap.xpose_buffer_size);
-	devc->cap.xpose_buffer = g_try_malloc0(devc->cap.xpose_buffer_size);
-	if (devc->cap.xpose_buffer == NULL) {
+		tr_pool_size);
+
+	devc->cap.tr_buffer = g_try_malloc0(tr_pool_size);
+	if (devc->cap.tr_buffer == NULL) {
 		return SR_ERR_MALLOC;
 	}
+
+	devc->cap.tr_workers = g_thread_pool_new(&xfer_sample_transpose_worker,
+						 devc, NUM_TRANSPOSE_WORKERS,
+						 TRUE, NULL);
+	if (devc->cap.tr_workers == NULL) {
+		g_free(devc->cap.tr_buffer);
+		return SR_ERR_MALLOC;
+	}
+	devc->cap.tr_out_queue = g_async_queue_new();
 
 	return SR_OK;
 }
@@ -720,32 +749,13 @@ static void cap_data_fini(const struct sr_dev_inst *sdi)
 	struct dev_context *devc;
 	devc = sdi->priv;
 
-	g_free(devc->cap.xpose_buffer);
-	devc->cap.xpose_buffer = NULL;
-	devc->cap.xpose_buffer_size = 0;
-}
-
-static void cap_data_send(const struct sr_dev_inst *sdi, const uint8_t *data,
-			  size_t length)
-{
-	struct dev_context *devc;
-	size_t samples;
-	devc = sdi->priv;
-
-	samples = cap_transpose_samples(data, length, devc->cap.xpose_buffer,
-					devc->channels.n, devc->channels.mask,
-					devc->config.sample_width);
-
-	const struct sr_datafeed_logic logic = {
-		.length = samples * devc->config.sample_width,
-		.unitsize = devc->config.sample_width,
-		.data = devc->cap.xpose_buffer
-	};
-
-	const struct sr_datafeed_packet packet = { .type = SR_DF_LOGIC,
-						   .payload = &logic };
-
-	sr_session_send(sdi, &packet);
+	g_thread_pool_free(devc->cap.tr_workers, TRUE, TRUE);
+	devc->cap.tr_workers = NULL;
+	g_async_queue_unref(devc->cap.tr_out_queue);
+	devc->cap.tr_out_queue = NULL;
+	g_free(devc->cap.tr_buffer);
+	devc->cap.tr_buffer = NULL;
+	devc->cap.tr_buffer_size = 0;
 }
 
 /**
@@ -762,7 +772,7 @@ static void cap_sample_xfer_resubmit(struct libusb_transfer *xfer,
 		sr_err("Failed to resubmit transfer: %s. Aborting "
 		       "session.",
 		       libusb_error_name(res));
-		devc->cap.state = CAP_STATE_HALT;
+		cap_halt(devc);
 	}
 }
 
@@ -770,9 +780,11 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 {
 	const struct sr_dev_inst *sdi;
 	struct dev_context *devc;
+	struct sample_xfer_user_data *user_data;
 	uint64_t bytes_received;
 
-	sdi = xfer->user_data;
+	user_data = xfer->user_data;
+	sdi = user_data->sdi;
 	devc = sdi->priv;
 
 	switch (xfer->status) {
@@ -787,7 +799,7 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 		sr_err("Unrecoverable status %d. Aborting session.",
 		       xfer->status);
 		devc->cap.n_active_data_xfers--;
-		devc->cap.state = CAP_STATE_HALT;
+		cap_halt(devc);
 		break;
 	case LIBUSB_TRANSFER_TIMED_OUT:
 	case LIBUSB_TRANSFER_COMPLETED:
@@ -809,23 +821,67 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 		}
 
 		bytes_received = devc->cap.bytes_received + xfer->actual_length;
+		user_data->seq = devc->cap.send_seq;
 
-		cap_data_send(sdi, xfer->buffer, xfer->actual_length);
+		g_thread_pool_push(devc->cap.tr_workers, xfer, NULL);
 
 		devc->cap.bytes_received = bytes_received;
+		devc->cap.send_seq++;
 
 		if (devc->cap.bytes_received / devc->channels.n * 8 >=
 		    devc->limit_samples) {
 			sr_info("Got enough samples. Transferring capture "
 				"state to HALT.");
 			devc->cap.n_active_data_xfers--;
-			devc->cap.state = CAP_STATE_HALT;
+			cap_halt(devc);
 			break;
 		}
 
-		cap_sample_xfer_resubmit(xfer, devc);
+		/* Technically we aren't transferring anymore at this point.
+		   Decrement counter. */
+		devc->cap.n_active_data_xfers--;
 		break;
 	}
+}
+
+static int xfer_sample_cmp(gconstpointer a, gconstpointer b, gpointer user_data)
+{
+	const struct libusb_transfer *const xfa = a;
+	const struct libusb_transfer *const xfb = b;
+	const struct sample_xfer_user_data *const aa = xfa->user_data;
+	const struct sample_xfer_user_data *const bb = xfb->user_data;
+
+	(void)user_data;
+
+	if (G_LIKELY(aa->seq > bb->seq))
+		return 1;
+	else if (aa->seq < bb->seq)
+		return -1;
+	else
+		return 0;
+}
+
+static void xfer_sample_transpose_worker(gpointer data, gpointer user_data)
+{
+	const struct dev_context *const devc = user_data;
+	struct libusb_transfer *const xfer = data;
+	struct sample_xfer_user_data *const xfer_user_data = xfer->user_data;
+
+	size_t samples;
+
+	samples = cap_transpose_samples(xfer->buffer, xfer->actual_length,
+					devc->cap.tr_buffer, devc->channels.n,
+					devc->channels.mask,
+					devc->config.sample_width);
+
+	xfer_user_data->packet.type = SR_DF_LOGIC;
+	xfer_user_data->packet.payload = &xfer_user_data->logic;
+	xfer_user_data->logic.length = samples * devc->config.sample_width;
+	xfer_user_data->logic.unitsize = devc->config.sample_width;
+	xfer_user_data->logic.data = xfer_user_data->tr_buffer;
+
+	g_async_queue_push_sorted(devc->cap.tr_out_queue, xfer,
+				  &xfer_sample_cmp, NULL);
 }
 
 /**
@@ -846,6 +902,7 @@ static void cap_sample_xfer_fini(const struct sr_dev_inst *sdi)
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
 		g_free(devc->cap.data_xfers[i]->buffer);
+		g_free(devc->cap.data_xfers[i]->user_data);
 		libusb_free_transfer(devc->cap.data_xfers[i]);
 		devc->cap.data_xfers[i] = NULL;
 	}
@@ -863,6 +920,7 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	struct sr_usb_dev_inst *usb;
+	struct sample_xfer_user_data *user_data;
 	unsigned char *xfer_buf;
 	int i;
 
@@ -887,10 +945,17 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 			cap_sample_xfer_fini(sdi);
 			return SR_ERR_MALLOC;
 		}
+
+		user_data = g_malloc0(sizeof(*user_data));
+
+		user_data->sdi = sdi;
+		user_data->tr_buffer =
+			&devc->cap.tr_buffer[devc->cap.tr_buffer_size * i];
+
 		libusb_fill_bulk_transfer(
 			devc->cap.data_xfers[i], usb->devhdl,
 			LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE, xfer_buf,
-			devc->buf_size, &cap_sample_xfer_event, (void *)sdi,
+			devc->buf_size, &cap_sample_xfer_event, user_data,
 			BUF_SIZE_MS * NUM_SIMUL_XFERS * 5 / 4);
 	}
 
@@ -946,6 +1011,8 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	struct sr_usb_dev_inst *usb;
 	struct dev_context *devc;
 	struct trigger_status status;
+	struct libusb_transfer *finished_xfer;
+	struct sample_xfer_user_data *finished_data;
 	struct timeval tv;
 
 	(void)fd;
@@ -967,11 +1034,43 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	libusb_handle_events_timeout_completed(drvc->sr_ctx->libusb_ctx, &tv,
 					       NULL);
 
+	/* Sample transpose output queue handler. */
+	/* Acquire lock to prevent sequence inversion. */
+	g_async_queue_lock(devc->cap.tr_out_queue);
+
+	while ((finished_xfer = g_async_queue_try_pop_unlocked(
+			devc->cap.tr_out_queue)) != NULL) {
+		finished_data = finished_xfer->user_data;
+		if (devc->cap.recv_seq != 0 &&
+		    finished_data->seq < devc->cap.recv_seq) {
+			sr_err("Sequence inversion detected. Aborting session.");
+			cap_halt(devc);
+			break;
+		} else if (finished_data->seq != devc->cap.recv_seq) {
+			/* Rollback previous pop operation. */
+			sr_info("Transpose %" PRIu64 "completed out of order.",
+				finished_data->seq);
+			g_async_queue_push_front_unlocked(
+				devc->cap.tr_out_queue, finished_xfer);
+			break;
+		} else {
+			/* Unload the data and resubmit transfer. */
+			sr_session_send(sdi, &finished_data->packet);
+			devc->cap.recv_seq++;
+			cap_sample_xfer_resubmit(finished_xfer, devc);
+			devc->cap.n_active_data_xfers++;
+		}
+	}
+
+	g_async_queue_unlock(devc->cap.tr_out_queue);
+
 	switch (devc->cap.state) {
 	case CAP_STATE_WAIT_TRIGGER:
 		/* Continue to wait for trigger condition if trigger hasn't
 		   been fired yet. */
-		ep0_get_trigger_status(usb->devhdl, &status);
+		if (ep0_get_trigger_status(usb->devhdl, &status) != SR_OK) {
+			break;
+		}
 		sr_spew("sample tick %" PRIu64, status.sample_offset);
 		if (status.pos_real != 0) {
 			sr_info("triggered after acquiring 0x%" PRIx64
@@ -993,15 +1092,16 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 		break;
 	case CAP_STATE_CLEANUP:
 		/* Make sure all the transfers stop before proceeding. */
-		if (devc->cap.n_active_data_xfers == 0) {
-			cap_sample_xfer_fini(sdi);
-			/* Get rid of the trigger transfer object as well. */
-			//cap_trigger_cleanup(sdi);
-			cap_data_fini(sdi);
-			/* Safe to terminate the event loop. */
-			std_session_send_df_end(sdi);
-			usb_source_remove(sdi->session, sdi->session->ctx);
+		if (devc->cap.n_active_data_xfers != 0 ||
+		    devc->cap.send_seq != devc->cap.recv_seq) {
+			break;
 		}
+		/* Destroy resources. */
+		cap_sample_xfer_fini(sdi);
+		cap_data_fini(sdi);
+		/* Safe to terminate the event loop. */
+		std_session_send_df_end(sdi);
+		usb_source_remove(sdi->session, sdi->session->ctx);
 		break;
 	default:
 		/* Do nothing. */
@@ -1354,21 +1454,21 @@ SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi)
 		return res;
 	}
 
-	res = cap_sample_xfer_init(sdi);
+	res = cap_data_init(sdi);
 	if (res != SR_OK) {
 		return res;
 	}
 
-	res = cap_data_init(sdi);
+	res = cap_sample_xfer_init(sdi);
 	if (res != SR_OK) {
-		cap_sample_xfer_fini(sdi);
+		cap_data_fini(sdi);
 		return res;
 	}
 
 	res = write_reg(sdi, REG_STOP, 0);
 	if (res != SR_OK) {
-		cap_data_fini(sdi);
 		cap_sample_xfer_fini(sdi);
+		cap_data_fini(sdi);
 		return res;
 	}
 
@@ -1388,7 +1488,7 @@ SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi)
 	sr_info("%s: Transferring capture state to HALT.", __func__);
 
 	devc = sdi->priv;
-	devc->cap.state = CAP_STATE_HALT;
+	cap_halt(devc);
 
 	return SR_OK;
 }

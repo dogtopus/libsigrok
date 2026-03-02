@@ -97,16 +97,18 @@ struct capture_state {
 	enum cap_state state;
 	uint32_t trigger_point_real;
 
-	//struct libusb_transfer *wft_xfer;
 	struct libusb_transfer **data_xfers;
 	uint8_t n_active_data_xfers;
 	uint64_t bytes_received;
+	uint64_t recv_seq;
+	uint64_t send_seq;
 
 	struct sr_datafeed_logic logic;
 	struct sr_datafeed_packet packet;
-	uint8_t *xpose_buffer;
-	size_t xpose_buffer_size;
-	//gboolean wft_done;
+	uint8_t *tr_buffer;
+	size_t tr_buffer_size;
+	GThreadPool *tr_workers;
+	GAsyncQueue *tr_out_queue;
 };
 
 struct dev_context {
