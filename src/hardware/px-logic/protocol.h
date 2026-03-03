@@ -95,6 +95,7 @@ struct capture_state {
 	enum cap_state state;
 	uint32_t trigger_point_real;
 	uint8_t sample_width;
+	gboolean skip_trigger;
 
 	uint8_t n_active_data_xfers;
 	struct libusb_transfer **data_xfers;

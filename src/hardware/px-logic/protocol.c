@@ -676,6 +676,10 @@ static int cap_data_init(const struct sr_dev_inst *sdi)
 	sr_info("Highest channel is %d", max_enabled_channel);
 	sr_info("Use sample width of %u", devc->cap.sample_width);
 
+	devc->cap.skip_trigger =
+		!(devc->trigger.low_mask | devc->trigger.high_mask |
+		  devc->trigger.rising_mask | devc->trigger.falling_mask);
+
 	devc->cap.tr_buffer_size =
 		devc->buf_size / devc->channels.n * 8 * devc->cap.sample_width;
 	tr_pool_size = devc->cap.tr_buffer_size * NUM_SIMUL_XFERS;
@@ -1070,6 +1074,10 @@ static inline void cap_send(struct capture_state *const cap,
 	samples = logic->length / logic->unitsize;
 	next_sent = cap->samples_sent + samples;
 
+	/* Don't draw the trigger line when no trigger has been activated. */
+	if (cap->skip_trigger)
+		goto send;
+
 	if (G_UNLIKELY(tp > cap->samples_sent && tp < next_sent)) {
 		sr_info("Trigger point hit. Sending trigger info.");
 		total_len = logic->length;
@@ -1090,6 +1098,7 @@ static inline void cap_send(struct capture_state *const cap,
 		std_session_send_df_trigger(sdi);
 	}
 
+send:
 	sr_session_send(sdi, &finished_data->packet);
 	cap->samples_sent = next_sent;
 }
