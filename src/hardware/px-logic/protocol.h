@@ -117,13 +117,14 @@ struct dev_context {
 	/* Capture properties. */
 	gboolean streaming;
 	gboolean filter;
+	gboolean invert_clock;
 	double voltage_threshold;
 	uint64_t samplerate;
 	uint64_t limit_samples;
 	uint64_t capture_ratio;
 
 	struct trigger_config trigger;
-	struct pwm_config pwm[1];
+	struct pwm_config pwm[2];
 
 	/* Values derived from properties. */
 	uint32_t buf_size;
@@ -141,6 +142,7 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi);
+SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi, uint8_t channel);
 SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi);
 SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi);
 

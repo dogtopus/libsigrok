@@ -49,12 +49,13 @@ static const uint32_t devopts[] = {
 	SR_CONF_VOLTAGE_THRESHOLD | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_CLOCK_EDGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 };
 
 static const uint32_t devopts_cg_pwm[] = {
 	SR_CONF_ENABLED | SR_CONF_GET | SR_CONF_SET,
-	SR_CONF_OUTPUT_FREQUENCY | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
-	SR_CONF_DUTY_CYCLE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_OUTPUT_FREQUENCY | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_DUTY_CYCLE | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const uint32_t devopts_cg_ext_trig[] = {
@@ -71,6 +72,11 @@ static const uint64_t samplerates[] = {
 	SR_MHZ(10),  SR_MHZ(20),  SR_MHZ(25),  SR_MHZ(50),
 	SR_MHZ(100), SR_MHZ(125), SR_MHZ(200), SR_MHZ(250),
 	SR_MHZ(400), SR_MHZ(500), SR_MHZ(800), SR_GHZ(1),
+};
+
+static const char *clock_edges[] = {
+	"rising",
+	"falling",
 };
 
 static const char *variant_names[] = {
@@ -243,11 +249,19 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 		}
 
 		/* Add PWM channels. */
-		cg = sr_channel_group_new(sdi, "PWM", NULL);
+		cg = sr_channel_group_new(sdi, "PWM0", NULL);
 		devc->cg_pwm = cg;
 
 		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
 				    "P0");
+		cg->channels = g_slist_append(cg->channels, ch);
+		ch_offset++;
+
+		cg = sr_channel_group_new(sdi, "PWM1", NULL);
+		devc->cg_pwm = cg;
+
+		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
+				    "P1");
 		cg->channels = g_slist_append(cg->channels, ch);
 		ch_offset++;
 
@@ -482,6 +496,9 @@ static int config_get_general(uint32_t key, GVariant **data,
 	case SR_CONF_CAPTURE_RATIO:
 		*data = g_variant_new_uint64(devc->capture_ratio);
 		break;
+	case SR_CONF_CLOCK_EDGE:
+		*data = g_variant_new_string(clock_edges[devc->invert_clock]);
+		break;
 	/* TODO */
 	default:
 		return SR_ERR_NA;
@@ -491,23 +508,27 @@ static int config_get_general(uint32_t key, GVariant **data,
 }
 
 static int config_get_pwm(uint32_t key, GVariant **data,
-			  const struct sr_dev_inst *sdi)
+			  const struct sr_dev_inst *sdi, uint8_t index)
 {
 	struct dev_context *devc;
 	int ret;
 
 	devc = sdi->priv;
 
+	if (index >= 2) {
+		return SR_ERR_ARG;
+	}
+
 	ret = SR_OK;
 	switch (key) {
 	case SR_CONF_ENABLED:
-		*data = g_variant_new_boolean(devc->pwm[0].enabled);
+		*data = g_variant_new_boolean(devc->pwm[index].enabled);
 		break;
 	case SR_CONF_OUTPUT_FREQUENCY:
-		*data = g_variant_new_double(devc->pwm[0].freq);
+		*data = g_variant_new_double(devc->pwm[index].freq);
 		break;
 	case SR_CONF_DUTY_CYCLE:
-		*data = g_variant_new_double(devc->pwm[0].duty);
+		*data = g_variant_new_double(devc->pwm[index].duty);
 		break;
 	default:
 		return SR_ERR_NA;
@@ -522,6 +543,7 @@ static int config_set_general(uint32_t key, GVariant *data,
 	int ret;
 	struct dev_context *devc;
 	double l, h;
+	int idx;
 
 	devc = sdi->priv;
 
@@ -546,6 +568,12 @@ static int config_set_general(uint32_t key, GVariant *data,
 	case SR_CONF_CAPTURE_RATIO:
 		devc->capture_ratio = g_variant_get_uint64(data);
 		break;
+	case SR_CONF_CLOCK_EDGE:
+		idx = std_str_idx(data, ARRAY_AND_SIZE(clock_edges));
+		if (idx < 0)
+			return SR_ERR_ARG;
+		devc->invert_clock = !!idx;
+		break;
 	/* TODO */
 	default:
 		ret = SR_ERR_NA;
@@ -555,27 +583,32 @@ static int config_set_general(uint32_t key, GVariant *data,
 }
 
 static int config_set_pwm(uint32_t key, GVariant *data,
-			  const struct sr_dev_inst *sdi)
+			  const struct sr_dev_inst *sdi, uint8_t index)
 {
 	int ret;
 	struct dev_context *devc;
 
 	devc = sdi->priv;
 
+	if (index >= 2) {
+		return SR_ERR_ARG;
+	}
+
 	ret = SR_OK;
 	switch (key) {
 	case SR_CONF_ENABLED:
-		devc->pwm[0].enabled = g_variant_get_boolean(data);
+		devc->pwm[index].enabled = g_variant_get_boolean(data);
 		sr_info("PWM0 enabled: %s.",
-			devc->pwm[0].enabled ? "true" : "false");
+			devc->pwm[index].enabled ? "true" : "false");
+		ret = px_logic_send_config_pwm(sdi, index);
 		break;
 	case SR_CONF_OUTPUT_FREQUENCY:
-		devc->pwm[0].freq = g_variant_get_double(data);
-		sr_info("PWM0 freq: %fHz.", devc->pwm[0].freq);
+		devc->pwm[index].freq = g_variant_get_double(data);
+		sr_info("PWM0 freq: %fHz.", devc->pwm[index].freq);
 		break;
 	case SR_CONF_DUTY_CYCLE:
-		devc->pwm[0].duty = g_variant_get_double(data);
-		sr_info("PWM0 duty cycle: %f.", devc->pwm[0].duty);
+		devc->pwm[index].duty = g_variant_get_double(data);
+		sr_info("PWM0 duty cycle: %f.", devc->pwm[index].duty);
 		break;
 	/* TODO */
 	default:
@@ -611,6 +644,9 @@ static int config_list_general(uint32_t key, GVariant **data,
 		*data = std_gvar_samplerates(
 			samplerates,
 			variant_samplerate_cutoff[devc->config.variant]);
+		break;
+	case SR_CONF_CLOCK_EDGE:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(clock_edges));
 		break;
 	default:
 		return SR_ERR_NA;
@@ -648,12 +684,6 @@ static int config_list_cg_pwm(uint32_t key, GVariant **data,
 	case SR_CONF_DEVICE_OPTIONS:
 		*data = std_gvar_array_u32(ARRAY_AND_SIZE(devopts_cg_pwm));
 		break;
-	case SR_CONF_OUTPUT_FREQUENCY:
-		*data = std_gvar_min_max_step(SR_HZ(1), SR_MHZ(1), SR_HZ(1));
-		break;
-	case SR_CONF_DUTY_CYCLE:
-		*data = std_gvar_min_max_step(0.01, 0.99, 0.01);
-		break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -667,8 +697,10 @@ static int config_get(uint32_t key, GVariant **data,
 {
 	if (!cg) {
 		return config_get_general(key, data, sdi);
-	} else if (g_strcmp0(cg->name, "PWM") == 0) {
-		return config_get_pwm(key, data, sdi);
+	} else if (g_strcmp0(cg->name, "PWM0") == 0) {
+		return config_get_pwm(key, data, sdi, 0);
+	} else if (g_strcmp0(cg->name, "PWM1") == 0) {
+		return config_get_pwm(key, data, sdi, 1);
 	}
 	return SR_ERR_NA;
 }
@@ -679,8 +711,10 @@ static int config_set(uint32_t key, GVariant *data,
 {
 	if (!cg) {
 		return config_set_general(key, data, sdi);
-	} else if (g_strcmp0(cg->name, "PWM") == 0) {
-		return config_set_pwm(key, data, sdi);
+	} else if (g_strcmp0(cg->name, "PWM0") == 0) {
+		return config_set_pwm(key, data, sdi, 0);
+	} else if (g_strcmp0(cg->name, "PWM1") == 0) {
+		return config_set_pwm(key, data, sdi, 1);
 	}
 	return SR_ERR_NA;
 }
@@ -691,7 +725,9 @@ static int config_list(uint32_t key, GVariant **data,
 {
 	if (!cg) {
 		return config_list_general(key, data, sdi);
-	} else if (g_strcmp0(cg->name, "PWM") == 0) {
+	} else if (g_strcmp0(cg->name, "PWM0") == 0) {
+		return config_list_cg_pwm(key, data, sdi);
+	} else if (g_strcmp0(cg->name, "PWM1") == 0) {
 		return config_list_cg_pwm(key, data, sdi);
 	} else if (g_strcmp0(cg->name, "EXT Trigger") == 0) {
 		return config_list_cg_ext_trig(key, data, sdi);

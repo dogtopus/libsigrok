@@ -103,6 +103,9 @@
 #define MODE_MASK_FILTER_EN (1 << 3)
 #define MODE_MASK_UNK_4 (1 << 4)
 
+#define CLK_CONF_MASK_SELECT (0x7)
+#define CLK_CONF_MASK_EDGE (1 << 3)
+
 #define PWM_CONF_MASK_EN (1 << 0)
 
 #define ALIGN_4K(x) ((x / 4096 + 1) * 4096)
@@ -133,159 +136,13 @@ static const uint64_t clk_conf_table[CLK_NUM_SUPPORTED] = {
 	[CLK_200MHZ] = SR_MHZ(200), [CLK_100MHZ] = SR_MHZ(100),
 };
 
-static int conf_convert_trigger(const struct sr_dev_inst *sdi)
-{
-	struct dev_context *devc;
-	struct sr_trigger *trigger;
-	struct sr_trigger_stage *stage;
-	struct sr_trigger_match *match;
-	const GSList *l, *m;
-	uint32_t mask;
-	uint32_t trigger_point, max_trigger_percent;
-	uint64_t depth_per_channel;
+/* ===== Forward declaration of callbacks ===== */
 
-	devc = sdi->priv;
+static int cap_top_event_handler(int fd, int revents, void *cb_data);
+static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer);
+static void xfer_sample_transpose_worker(gpointer data, gpointer user_data);
 
-	trigger = sr_session_trigger_get(sdi->session);
-
-	if (trigger == NULL) {
-		memset(&devc->trigger, 0, sizeof(devc->trigger));
-		return SR_OK;
-	}
-
-	if (devc->channels.n == 0)
-		depth_per_channel = 0;
-	else
-		depth_per_channel =
-			(devc->config.max_buffer_depth / devc->channels.n) &
-			0xfffffc00;
-
-	max_trigger_percent = devc->streaming ? 10 : MAX_TRIG_PERCENT;
-
-	trigger_point = MAX(STRIPE_SIZE_BYTES,
-			    devc->capture_ratio * devc->limit_samples / 100);
-	trigger_point = MIN(depth_per_channel * max_trigger_percent / 100,
-			    trigger_point);
-
-	devc->trigger.point = trigger_point;
-
-	for (l = trigger->stages; l; l = l->next) {
-		stage = l->data;
-		for (m = stage->matches; m; m = m->next) {
-			match = m->data;
-			if (!match->channel->enabled ||
-			    match->channel->type != SR_CHANNEL_LOGIC)
-				continue;
-
-			mask = 1 << (match->channel->index);
-
-			switch (match->match) {
-			case SR_TRIGGER_ONE:
-				devc->trigger.high_mask |= mask;
-				break;
-			case SR_TRIGGER_ZERO:
-				devc->trigger.low_mask |= mask;
-				break;
-			case SR_TRIGGER_RISING:
-				devc->trigger.rising_mask |= mask;
-				break;
-			case SR_TRIGGER_FALLING:
-				devc->trigger.falling_mask |= mask;
-				break;
-			case SR_TRIGGER_EDGE:
-				devc->trigger.rising_mask |= mask;
-				devc->trigger.falling_mask |= mask;
-				break;
-			}
-		}
-	}
-
-	return SR_OK;
-}
-
-/**
- * Transpose the DSLogic-style samples (striped channels) to sigrok-style
- * (bitfield samples padded to bytes).
- *
- * Converts the samples from format of
- *
- * `aaa...bbb...ccc...ddd...`
- *
- * to
- *
- * `abcd...abcd...abcd...`
- * 
- * @param src Samples in striped channels format.
- *
- * @param length Total length of the samples in bytes. Must be aligned to 64
- *               samples.
- *
- * @param dst_ptr Samples in bitfield format.
- *
- * @param channel_count Number of active channels. Must be consistent with
- *                      channel_mask.
- *
- * @param channel_mask Active channels. Must be consistent with channel_count.
- *
- * @param sample_width_bytes Sample width in bytes (2 or 4 depending on
- *                           variant).
- */
-static size_t cap_transpose_samples(const uint8_t *src, size_t length,
-				    uint8_t *dst_ptr, size_t channel_count,
-				    uint32_t channel_mask,
-				    size_t sample_width_bytes)
-{
-	const uint8_t *const end_ptr = src + length;
-	const size_t sample_width_bits = sample_width_bytes * 8;
-	/* Only active channels will have stripes of data available. */
-	const size_t in_frame_size = channel_count * STRIPE_SIZE_BYTES;
-	/* 64 converted samples, each 2 or 4 bytes in size. */
-	const size_t out_frame_size = STRIPE_SIZE_BITS * sample_width_bytes;
-
-	const uint8_t *src_ptr, *stripe_ptr;
-	uint8_t *out_ptr, *out_sample_ptr;
-	uint8_t channel;
-	uint64_t stripe;
-	size_t out_samples, out_size;
-
-	out_ptr = dst_ptr;
-	out_samples = 0;
-
-	out_size = out_frame_size * length / in_frame_size;
-	memset(dst_ptr, 0, out_size);
-
-	/* Process one frame at a time. */
-	for (src_ptr = src; src_ptr < end_ptr; src_ptr += in_frame_size) {
-		stripe_ptr = src_ptr;
-		/* TODO: use ctz + bit clear here may be better. */
-		for (channel = 0; channel < sample_width_bits; channel++) {
-			/* This stripe does not belong to this bit in the
-			   output sample. */
-			if (!(channel_mask & (1 << channel))) {
-				continue;
-			}
-
-			/* Device endian. */
-			stripe = RL64(stripe_ptr);
-
-			/* Write the stripe as a column on the output sample
-			 * matrix. */
-			for (out_sample_ptr = out_ptr; stripe != 0;
-			     out_sample_ptr += sample_width_bytes) {
-				if (stripe & 1)
-					out_sample_ptr[channel / 8] |=
-						1 << (channel % 8);
-				stripe >>= 1;
-			}
-
-			stripe_ptr += STRIPE_SIZE_BYTES;
-		}
-
-		out_ptr += out_frame_size;
-		out_samples += STRIPE_SIZE_BITS;
-	}
-	return out_samples;
-}
+/* ===== Device control and register access routines ===== */
 
 static int ep0_get_trigger_status(libusb_device_handle *devhdl,
 				  struct trigger_status *status)
@@ -585,7 +442,7 @@ static gboolean fpga_reg_sanity_check(const struct sr_dev_inst *sdi)
 	if (res != SR_OK)
 		return FALSE;
 
-	if (reg >= CLK_NUM_SUPPORTED)
+	if ((reg & ~(CLK_CONF_MASK_SELECT | CLK_CONF_MASK_EDGE)) != 0)
 		return FALSE;
 
 	res = read_reg(sdi, REG_CLK_DIV, &reg);
@@ -606,6 +463,78 @@ static gboolean fpga_reg_sanity_check(const struct sr_dev_inst *sdi)
 		return FALSE;
 
 	return TRUE;
+}
+
+/* ===== Device configuration helpers ===== */
+
+static int conf_convert_trigger(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	struct sr_trigger *trigger;
+	struct sr_trigger_stage *stage;
+	struct sr_trigger_match *match;
+	const GSList *l, *m;
+	uint32_t mask;
+	uint32_t trigger_point, max_trigger_percent;
+	uint64_t depth_per_channel;
+
+	devc = sdi->priv;
+
+	trigger = sr_session_trigger_get(sdi->session);
+
+	if (trigger == NULL) {
+		memset(&devc->trigger, 0, sizeof(devc->trigger));
+		return SR_OK;
+	}
+
+	if (devc->channels.n == 0)
+		depth_per_channel = 0;
+	else
+		depth_per_channel =
+			(devc->config.max_buffer_depth / devc->channels.n) &
+			0xfffffc00;
+
+	max_trigger_percent = devc->streaming ? 10 : MAX_TRIG_PERCENT;
+
+	trigger_point = MAX(STRIPE_SIZE_BYTES,
+			    devc->capture_ratio * devc->limit_samples / 100);
+	trigger_point = MIN(depth_per_channel * max_trigger_percent / 100,
+			    trigger_point);
+
+	devc->trigger.point = trigger_point;
+
+	for (l = trigger->stages; l; l = l->next) {
+		stage = l->data;
+		for (m = stage->matches; m; m = m->next) {
+			match = m->data;
+			if (!match->channel->enabled ||
+			    match->channel->type != SR_CHANNEL_LOGIC)
+				continue;
+
+			mask = 1 << (match->channel->index);
+
+			switch (match->match) {
+			case SR_TRIGGER_ONE:
+				devc->trigger.high_mask |= mask;
+				break;
+			case SR_TRIGGER_ZERO:
+				devc->trigger.low_mask |= mask;
+				break;
+			case SR_TRIGGER_RISING:
+				devc->trigger.rising_mask |= mask;
+				break;
+			case SR_TRIGGER_FALLING:
+				devc->trigger.falling_mask |= mask;
+				break;
+			case SR_TRIGGER_EDGE:
+				devc->trigger.rising_mask |= mask;
+				devc->trigger.falling_mask |= mask;
+				break;
+			}
+		}
+	}
+
+	return SR_OK;
 }
 
 static int conf_set_vref(const struct sr_dev_inst *sdi)
@@ -698,13 +627,17 @@ static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
 		}
 	}
 
+	if (devc->invert_clock) {
+		clk_conf |= CLK_CONF_MASK_EDGE;
+	}
+
 	TRY_WRITE_REG(sdi, REG_CLK_CONF, clk_conf);
 	TRY_WRITE_REG(sdi, REG_CLK_DIV, clk_div);
 
 	return SR_OK;
 }
 
-static void xfer_sample_transpose_worker(gpointer data, gpointer user_data);
+/* ===== Capture lifecycle control ===== */
 
 static void cap_halt(struct dev_context *devc)
 {
@@ -781,12 +714,14 @@ static void cap_data_fini(const struct sr_dev_inst *sdi)
 	devc->cap.tr_buffer_size = 0;
 }
 
+/* ===== Sample transfer control ===== */
+
 /**
  * Shortcut to resubmit an individual transfer. Must be called at a control
  * flow tail.
  */
-static void cap_sample_xfer_resubmit(struct libusb_transfer *xfer,
-				     struct dev_context *devc)
+static void xfer_sample_resubmit(struct libusb_transfer *xfer,
+				 struct dev_context *devc)
 {
 	int res;
 
@@ -799,7 +734,7 @@ static void cap_sample_xfer_resubmit(struct libusb_transfer *xfer,
 	}
 }
 
-static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
+static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 {
 	const struct sr_dev_inst *sdi;
 	struct dev_context *devc;
@@ -839,7 +774,7 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 			/* Timeout/0 bytes received could indicate that the
 			 * device is still waiting for captured data. It's safe
 			 * to just resubmit the transfer. */
-			cap_sample_xfer_resubmit(xfer, devc);
+			xfer_sample_resubmit(xfer, devc);
 			break;
 		}
 
@@ -885,6 +820,90 @@ static int xfer_sample_cmp(gconstpointer a, gconstpointer b, gpointer user_data)
 		return 0;
 }
 
+/**
+ * Transpose the DSLogic-style samples (striped channels) to sigrok-style
+ * (bitfield samples padded to bytes).
+ *
+ * Converts the samples from format of
+ *
+ * `aaa...bbb...ccc...ddd...`
+ *
+ * to
+ *
+ * `abcd...abcd...abcd...`
+ * 
+ * @param src Samples in striped channels format.
+ *
+ * @param length Total length of the samples in bytes. Must be aligned to 64
+ *               samples.
+ *
+ * @param dst_ptr Samples in bitfield format.
+ *
+ * @param channel_count Number of active channels. Must be consistent with
+ *                      channel_mask.
+ *
+ * @param channel_mask Active channels. Must be consistent with channel_count.
+ *
+ * @param sample_width_bytes Sample width in bytes (2 or 4 depending on
+ *                           variant).
+ */
+static size_t xfer_sample_transpose(const uint8_t *src, size_t length,
+				    uint8_t *dst_ptr, size_t channel_count,
+				    uint32_t channel_mask,
+				    size_t sample_width_bytes)
+{
+	const uint8_t *const end_ptr = src + length;
+	const size_t sample_width_bits = sample_width_bytes * 8;
+	/* Only active channels will have stripes of data available. */
+	const size_t in_frame_size = channel_count * STRIPE_SIZE_BYTES;
+	/* 64 converted samples, each 2 or 4 bytes in size. */
+	const size_t out_frame_size = STRIPE_SIZE_BITS * sample_width_bytes;
+
+	const uint8_t *src_ptr, *stripe_ptr;
+	uint8_t *out_ptr, *out_sample_ptr;
+	uint8_t channel;
+	uint64_t stripe;
+	size_t out_samples, out_size;
+
+	out_ptr = dst_ptr;
+	out_samples = 0;
+
+	out_size = out_frame_size * length / in_frame_size;
+	memset(dst_ptr, 0, out_size);
+
+	/* Process one frame at a time. */
+	for (src_ptr = src; src_ptr < end_ptr; src_ptr += in_frame_size) {
+		stripe_ptr = src_ptr;
+		/* TODO: use ctz + bit clear here may be better. */
+		for (channel = 0; channel < sample_width_bits; channel++) {
+			/* This stripe does not belong to this bit in the
+			   output sample. */
+			if (!(channel_mask & (1 << channel))) {
+				continue;
+			}
+
+			/* Device endian. */
+			stripe = RL64(stripe_ptr);
+
+			/* Write the stripe as a column on the output sample
+			 * matrix. */
+			for (out_sample_ptr = out_ptr; stripe != 0;
+			     out_sample_ptr += sample_width_bytes) {
+				if (stripe & 1)
+					out_sample_ptr[channel / 8] |=
+						1 << (channel % 8);
+				stripe >>= 1;
+			}
+
+			stripe_ptr += STRIPE_SIZE_BYTES;
+		}
+
+		out_ptr += out_frame_size;
+		out_samples += STRIPE_SIZE_BITS;
+	}
+	return out_samples;
+}
+
 static void xfer_sample_transpose_worker(gpointer data, gpointer user_data)
 {
 	const struct dev_context *const devc = user_data;
@@ -893,7 +912,7 @@ static void xfer_sample_transpose_worker(gpointer data, gpointer user_data)
 
 	size_t samples;
 
-	samples = cap_transpose_samples(xfer->buffer, xfer->actual_length,
+	samples = xfer_sample_transpose(xfer->buffer, xfer->actual_length,
 					xfer_user_data->tr_buffer,
 					devc->channels.n, devc->channels.mask,
 					devc->cap.sample_width);
@@ -907,6 +926,8 @@ static void xfer_sample_transpose_worker(gpointer data, gpointer user_data)
 	g_async_queue_push_sorted(devc->cap.tr_out_queue, xfer,
 				  &xfer_sample_cmp, NULL);
 }
+
+/* ===== Sample transfer lifecycle control ===== */
 
 /**
  * Deletes the sample transfer pool only. Should terminate all transfers
@@ -979,7 +1000,7 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 		libusb_fill_bulk_transfer(
 			devc->cap.data_xfers[i], usb->devhdl,
 			LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE, xfer_buf,
-			devc->buf_size, &cap_sample_xfer_event, user_data,
+			devc->buf_size, &xfer_sample_event, user_data,
 			BUF_SIZE_MS * NUM_SIMUL_XFERS * 5 / 4);
 	}
 
@@ -1029,6 +1050,8 @@ static void cap_sample_xfer_end(const struct sr_dev_inst *sdi)
 		}
 	}
 }
+
+/* ===== Capture state machine ===== */
 
 static int cap_top_event_handler(int fd, int revents, void *cb_data)
 {
@@ -1085,7 +1108,7 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 			/* Unload the data and resubmit transfer. */
 			sr_session_send(sdi, &finished_data->packet);
 			devc->cap.recv_seq++;
-			cap_sample_xfer_resubmit(finished_xfer, devc);
+			xfer_sample_resubmit(finished_xfer, devc);
 			devc->cap.n_active_data_xfers++;
 		}
 	}
@@ -1138,6 +1161,8 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 
 	return TRUE;
 }
+
+/* ===== Public interface ===== */
 
 SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi)
 {
@@ -1274,40 +1299,48 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	uint32_t clk_conf, clk_div, mode, num_samples_lo, num_samples_hi;
+	uint32_t clk_conf, clk_select, clk_div, mode, num_samples_lo,
+		num_samples_hi, pwm0_conf, pwm0_period, pwm0_duty, pwm1_conf,
+		pwm1_period, pwm1_duty;
 	uint64_t samplerate;
 
 	devc = sdi->priv;
 
 	clk_conf = 0;
+	clk_select = 0;
 	clk_div = 0;
 	num_samples_lo = 0;
 	num_samples_hi = 0;
 	mode = 0;
+	pwm0_conf = 0;
+	pwm0_period = 0;
+	pwm0_duty = 0;
+	pwm1_conf = 0;
+	pwm1_period = 0;
+	pwm1_duty = 0;
 
 	TRY_READ_REG(sdi, REG_CLK_CONF, &clk_conf);
 	TRY_READ_REG(sdi, REG_CLK_DIV, &clk_div);
 	TRY_READ_REG(sdi, REG_NUM_SAMPLES_LO, &num_samples_lo);
 	TRY_READ_REG(sdi, REG_NUM_SAMPLES_HI, &num_samples_hi);
 	TRY_READ_REG(sdi, REG_MODE, &mode);
+	TRY_READ_REG(sdi, REG_PWM0_CONF, &pwm0_conf);
+	TRY_READ_REG(sdi, REG_PWM0_CMP_PERIOD, &pwm0_period);
+	TRY_READ_REG(sdi, REG_PWM0_CMP_DUTY, &pwm0_duty);
+	TRY_READ_REG(sdi, REG_PWM1_CONF, &pwm1_conf);
+	TRY_READ_REG(sdi, REG_PWM1_CMP_PERIOD, &pwm1_period);
+	TRY_READ_REG(sdi, REG_PWM1_CMP_DUTY, &pwm1_duty);
 
 	sr_info("Clock configuration on device: CLK_CONF = 0x%08x, "
 		"CLK_DIV = 0x%08x",
 		clk_conf, clk_div);
-	if (clk_div != 0 && clk_conf != CLK_100MHZ) {
+	clk_select = clk_conf & CLK_CONF_MASK_SELECT;
+	if (clk_div != 0 && clk_select != CLK_100MHZ) {
 		sr_info("Custom sampling clock configuration is not supported "
 			"yet. Falling back to a safe default.");
 		samplerate = SR_MHZ(125);
-	} else if (clk_conf >= CLK_NUM_SUPPORTED) {
-		/* This technically should never happen since otherwise the
-		   sanity check won't pass. Still check it regardless for good
-		   measure. */
-		sr_info("Invalid clock configuration %u. Falling back to a safe"
-			"default.",
-			clk_conf);
-		samplerate = SR_MHZ(125);
-	} else if (clk_conf != CLK_100MHZ) {
-		samplerate = clk_conf_table[clk_conf];
+	} else if (clk_select != CLK_100MHZ) {
+		samplerate = clk_conf_table[clk_select];
 	} else {
 		switch (clk_div) {
 		case 99:
@@ -1346,6 +1379,7 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	}
 
 	devc->samplerate = samplerate;
+	devc->invert_clock = !!(clk_conf & CLK_CONF_MASK_EDGE);
 
 	devc->limit_samples = ((uint64_t)num_samples_lo) |
 			      ((uint64_t)num_samples_hi << 32);
@@ -1353,6 +1387,17 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	sr_info("Mode configuration on device: 0x%08x", mode);
 	devc->streaming = mode & MODE_MASK_STREAMING;
 	devc->filter = mode & MODE_MASK_FILTER_EN;
+
+	sr_info("PWM0 conf=%08x, period=%u, duty=%u", pwm0_conf, pwm0_period,
+		pwm0_duty);
+	sr_info("PWM1 conf=%08x, period=%u, duty=%u", pwm1_conf, pwm1_period,
+		pwm1_duty);
+	devc->pwm[0].enabled = !!(pwm0_conf & 1);
+	devc->pwm[0].freq = (double)FPGA_F_PWM / pwm0_period;
+	devc->pwm[0].duty = (double)pwm0_duty / pwm0_period;
+	devc->pwm[1].enabled = !!(pwm1_conf & 1);
+	devc->pwm[1].freq = (double)FPGA_F_PWM / pwm1_period;
+	devc->pwm[1].duty = (double)pwm1_duty / pwm0_period;
 
 	return SR_OK;
 }
@@ -1368,15 +1413,6 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	devc->channels = conf_compute_channel_config(sdi);
 	devc->buf_size = conf_compute_buf_size(
 		devc->config.speed, devc->samplerate, devc->channels.n);
-
-	/* Disable PWM channels as we are not supporting them for now. */
-	TRY_WRITE_REG(sdi, REG_PWM0_CONF, 0);
-	TRY_WRITE_REG(sdi, REG_PWM0_CMP_PERIOD, 0);
-	TRY_WRITE_REG(sdi, REG_PWM0_CMP_DUTY, 0);
-
-	TRY_WRITE_REG(sdi, REG_PWM1_CONF, 0);
-	TRY_WRITE_REG(sdi, REG_PWM1_CMP_PERIOD, 0);
-	TRY_WRITE_REG(sdi, REG_PWM1_CMP_DUTY, 0);
 
 	/* Set input reference voltage. */
 	ret = conf_set_vref(sdi);
@@ -1433,6 +1469,40 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 
 	TRY_WRITE_REG(sdi, REG_MODE,
 		      mode_reg | (devc->filter ? MODE_MASK_FILTER_EN : 0));
+
+	return SR_OK;
+}
+
+SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
+				     uint8_t channel)
+{
+	struct dev_context *const devc = sdi->priv;
+	uint32_t period, duty;
+
+	if (channel >= 2) {
+		sr_err("Invalid PWM channel %u", channel);
+		return SR_ERR_ARG;
+	}
+
+	if (devc->pwm[channel].enabled && devc->pwm[channel].freq == 0) {
+		sr_err("Refusing to enable channel %u that has frequency value"
+		       " configured as 0.",
+		       channel);
+		return SR_ERR_ARG;
+	}
+
+	period = FPGA_F_PWM / devc->pwm[channel].freq;
+	duty = devc->pwm[channel].duty * period;
+
+	if (channel == 0) {
+		TRY_WRITE_REG(sdi, REG_PWM0_CMP_PERIOD, period);
+		TRY_WRITE_REG(sdi, REG_PWM0_CMP_DUTY, duty);
+		TRY_WRITE_REG(sdi, REG_PWM0_CONF, devc->pwm[0].enabled);
+	} else if (channel == 1) {
+		TRY_WRITE_REG(sdi, REG_PWM1_CMP_PERIOD, period);
+		TRY_WRITE_REG(sdi, REG_PWM1_CMP_DUTY, duty);
+		TRY_WRITE_REG(sdi, REG_PWM1_CONF, devc->pwm[1].enabled);
+	}
 
 	return SR_OK;
 }
