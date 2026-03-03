@@ -828,14 +828,14 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 	case LIBUSB_TRANSFER_COMPLETED:
 		sr_spew("got %d bytes from sample FIFO", xfer->actual_length);
 
-		if (devc->cap.state != CAP_STATE_SAMPLE_XFER) {
+		if (G_UNLIKELY(devc->cap.state != CAP_STATE_SAMPLE_XFER)) {
 			/* Ignore data and wait for cancellation if not
 			 * receiving samples. */
 			devc->cap.n_active_data_xfers--;
 			break;
 		}
 
-		if (xfer->actual_length == 0) {
+		if (G_UNLIKELY(xfer->actual_length == 0)) {
 			/* Timeout/0 bytes received could indicate that the
 			 * device is still waiting for captured data. It's safe
 			 * to just resubmit the transfer. */
@@ -851,8 +851,8 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 		devc->cap.bytes_received = bytes_received;
 		devc->cap.send_seq++;
 
-		if (devc->cap.bytes_received / devc->channels.n * 8 >=
-		    devc->limit_samples) {
+		if (G_UNLIKELY(bytes_received / devc->channels.n * 8 >=
+			       devc->limit_samples)) {
 			sr_info("Got enough samples. Transferring capture "
 				"state to HALT.");
 			devc->cap.n_active_data_xfers--;
@@ -861,7 +861,8 @@ static void LIBUSB_CALL cap_sample_xfer_event(struct libusb_transfer *xfer)
 		}
 
 		/* Technically we aren't transferring anymore at this point.
-		   Decrement counter. */
+		   Decrement counter so the loop shutdown check logic will
+		   be happy. */
 		devc->cap.n_active_data_xfers--;
 		break;
 	}
@@ -986,14 +987,16 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 }
 
 /**
- * Fires all the transfers the sample transfer pool.
+ * Start all transfers in the sample transfer pool.
  */
 static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
+	struct sr_usb_dev_inst *const usb = sdi->conn;
+
 	int i, ret;
 
-	devc = sdi->priv;
+	libusb_clear_halt(usb->devhdl, LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE);
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
 		ret = libusb_submit_transfer(devc->cap.data_xfers[i]);
@@ -1064,14 +1067,16 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	while ((finished_xfer = g_async_queue_try_pop_unlocked(
 			devc->cap.tr_out_queue)) != NULL) {
 		finished_data = finished_xfer->user_data;
-		if (devc->cap.recv_seq != 0 &&
-		    finished_data->seq < devc->cap.recv_seq) {
-			sr_err("Sequence inversion detected. Aborting session.");
+		if (G_UNLIKELY(devc->cap.recv_seq != 0 &&
+			       finished_data->seq < devc->cap.recv_seq)) {
+			sr_err("Sequence inversion detected. Aborting "
+			       "session.");
 			cap_halt(devc);
 			break;
-		} else if (finished_data->seq != devc->cap.recv_seq) {
+		} else if (G_UNLIKELY(finished_data->seq !=
+				      devc->cap.recv_seq)) {
 			/* Rollback previous pop operation. */
-			sr_info("Transpose %" PRIu64 "completed out of order.",
+			sr_info("Task %" PRIu64 " completed out of order.",
 				finished_data->seq);
 			g_async_queue_push_front_unlocked(
 				devc->cap.tr_out_queue, finished_xfer);
@@ -1099,7 +1104,7 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 			sr_info("triggered after acquiring 0x%" PRIx64
 				" samples, point at 0x%" PRIx32 ", int trigger"
 				" status 0x%08" PRIx32 ". Transferring capture"
-				" state to SAMPLE_XFER",
+				" state to SAMPLE_XFER.",
 				status.sample_offset, status.pos_real,
 				status.activated);
 			devc->cap.state = CAP_STATE_SAMPLE_XFER;
@@ -1269,41 +1274,22 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	uint32_t pwm_vref_period, pwm_vref_duty, clk_conf, clk_div, mode,
-		num_samples_lo, num_samples_hi;
-	double pwm_vref_freq, io_vref;
+	uint32_t clk_conf, clk_div, mode, num_samples_lo, num_samples_hi;
 	uint64_t samplerate;
 
 	devc = sdi->priv;
 
-	pwm_vref_period = 0;
-	pwm_vref_duty = 0;
 	clk_conf = 0;
 	clk_div = 0;
 	num_samples_lo = 0;
 	num_samples_hi = 0;
 	mode = 0;
 
-	TRY_READ_REG(sdi, REG_PWM_VREF_CMP_PERIOD, &pwm_vref_period);
-	TRY_READ_REG(sdi, REG_PWM_VREF_CMP_PERIOD, &pwm_vref_duty);
 	TRY_READ_REG(sdi, REG_CLK_CONF, &clk_conf);
 	TRY_READ_REG(sdi, REG_CLK_DIV, &clk_div);
 	TRY_READ_REG(sdi, REG_NUM_SAMPLES_LO, &num_samples_lo);
 	TRY_READ_REG(sdi, REG_NUM_SAMPLES_HI, &num_samples_hi);
 	TRY_READ_REG(sdi, REG_MODE, &mode);
-
-	pwm_vref_freq = (double)FPGA_F_PWM_VREF / pwm_vref_period;
-	io_vref = (double)pwm_vref_duty / pwm_vref_freq * FPGA_VCCIO /
-		  FPGA_INPUT_VDIV;
-
-	sr_info("VREF from device is %fV, switching freq is %fHz", io_vref,
-		pwm_vref_freq);
-
-	if (io_vref < VREF_MIN || io_vref > VREF_MAX) {
-		sr_info("VREF exceeds our threshold, reset to 2V.");
-		io_vref = VREF_DEFAULT;
-	}
-	devc->voltage_threshold = io_vref;
 
 	sr_info("Clock configuration on device: CLK_CONF = 0x%08x, "
 		"CLK_DIV = 0x%08x",
@@ -1312,67 +1298,53 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 		sr_info("Custom sampling clock configuration is not supported "
 			"yet. Falling back to a safe default.");
 		samplerate = SR_MHZ(125);
+	} else if (clk_conf >= CLK_NUM_SUPPORTED) {
+		/* This technically should never happen since otherwise the
+		   sanity check won't pass. Still check it regardless for good
+		   measure. */
+		sr_info("Invalid clock configuration %u. Falling back to a safe"
+			"default.",
+			clk_conf);
+		samplerate = SR_MHZ(125);
+	} else if (clk_conf != CLK_100MHZ) {
+		samplerate = clk_conf_table[clk_conf];
 	} else {
-		switch (clk_conf) {
-		case CLK_1GHZ:
-			samplerate = SR_GHZ(1);
+		switch (clk_div) {
+		case 99:
+			samplerate = SR_MHZ(1);
 			break;
-		case CLK_800MHZ:
-			samplerate = SR_MHZ(800);
+		case 49:
+			samplerate = SR_MHZ(2);
 			break;
-		case CLK_500MHZ:
-			samplerate = SR_MHZ(500);
+		case 24:
+			samplerate = SR_MHZ(4);
 			break;
-		case CLK_400MHZ:
-			samplerate = SR_MHZ(400);
+		case 19:
+			samplerate = SR_MHZ(5);
 			break;
-		case CLK_250MHZ:
-			samplerate = SR_MHZ(250);
+		case 9:
+			samplerate = SR_MHZ(10);
 			break;
-		case CLK_200MHZ:
-			samplerate = SR_MHZ(200);
+		case 4:
+			samplerate = SR_MHZ(20);
 			break;
-		case CLK_125MHZ:
+		case 3:
+			samplerate = SR_MHZ(25);
+			break;
+		case 1:
+			samplerate = SR_MHZ(50);
+			break;
+		case 0:
+			samplerate = SR_MHZ(100);
+			break;
+		default:
+			sr_info("Irregular divider is not supported yet. "
+				"Falling back to a safe default.");
 			samplerate = SR_MHZ(125);
 			break;
-		case CLK_100MHZ:
-		default:
-			switch (clk_div) {
-			case 99:
-				samplerate = SR_MHZ(1);
-				break;
-			case 49:
-				samplerate = SR_MHZ(2);
-				break;
-			case 24:
-				samplerate = SR_MHZ(4);
-				break;
-			case 19:
-				samplerate = SR_MHZ(5);
-				break;
-			case 9:
-				samplerate = SR_MHZ(10);
-				break;
-			case 4:
-				samplerate = SR_MHZ(20);
-				break;
-			case 3:
-				samplerate = SR_MHZ(25);
-				break;
-			case 1:
-				samplerate = SR_MHZ(50);
-				break;
-			case 0:
-				samplerate = SR_MHZ(100);
-				break;
-			default:
-				sr_info("Irregular divider is not supported"
-					"yet. Falling back to a safe default.");
-				samplerate = SR_MHZ(125);
-				break;
-			}
 		}
 	}
+
 	devc->samplerate = samplerate;
 
 	devc->limit_samples = ((uint64_t)num_samples_lo) |
