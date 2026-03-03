@@ -132,7 +132,6 @@ struct dev_context {
 
 	struct sr_channel_group *cg_logic;
 	struct sr_channel_group *cg_pwm;
-	struct sr_channel_group *cg_ext_trig;
 
 	struct capture_state cap;
 };

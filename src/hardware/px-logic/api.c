@@ -58,10 +58,6 @@ static const uint32_t devopts_cg_pwm[] = {
 	SR_CONF_DUTY_CYCLE | SR_CONF_GET | SR_CONF_SET,
 };
 
-static const uint32_t devopts_cg_ext_trig[] = {
-	SR_CONF_ENABLED | SR_CONF_GET | SR_CONF_SET,
-};
-
 static const int32_t trigger_matches[] = {
 	SR_TRIGGER_ZERO,    SR_TRIGGER_ONE,  SR_TRIGGER_RISING,
 	SR_TRIGGER_FALLING, SR_TRIGGER_EDGE,
@@ -262,20 +258,6 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 
 		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
 				    "P1");
-		cg->channels = g_slist_append(cg->channels, ch);
-		ch_offset++;
-
-		/* Add external trigger channels. */
-		cg = sr_channel_group_new(sdi, "EXT Trigger", NULL);
-		devc->cg_ext_trig = cg;
-
-		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
-				    "TI");
-		cg->channels = g_slist_append(cg->channels, ch);
-		ch_offset++;
-
-		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
-				    "TO");
 		cg->channels = g_slist_append(cg->channels, ch);
 		ch_offset++;
 
@@ -655,24 +637,6 @@ static int config_list_general(uint32_t key, GVariant **data,
 	return ret;
 }
 
-static int config_list_cg_ext_trig(uint32_t key, GVariant **data,
-				   const struct sr_dev_inst *sdi)
-{
-	(void)sdi;
-	int ret;
-
-	ret = SR_OK;
-	switch (key) {
-	case SR_CONF_DEVICE_OPTIONS:
-		*data = std_gvar_array_u32(ARRAY_AND_SIZE(devopts_cg_ext_trig));
-		break;
-	default:
-		return SR_ERR_NA;
-	}
-
-	return ret;
-}
-
 static int config_list_cg_pwm(uint32_t key, GVariant **data,
 			      const struct sr_dev_inst *sdi)
 {
@@ -729,8 +693,6 @@ static int config_list(uint32_t key, GVariant **data,
 		return config_list_cg_pwm(key, data, sdi);
 	} else if (g_strcmp0(cg->name, "PWM1") == 0) {
 		return config_list_cg_pwm(key, data, sdi);
-	} else if (g_strcmp0(cg->name, "EXT Trigger") == 0) {
-		return config_list_cg_ext_trig(key, data, sdi);
 	}
 
 	return SR_ERR_NA;
