@@ -99,6 +99,7 @@ struct capture_state {
 	uint8_t n_active_data_xfers;
 	struct libusb_transfer **data_xfers;
 	uint64_t bytes_received;
+	uint64_t samples_sent;
 	uint64_t recv_seq;
 	uint64_t send_seq;
 

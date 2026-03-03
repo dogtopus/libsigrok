@@ -740,6 +740,7 @@ static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 	struct dev_context *devc;
 	struct sample_xfer_user_data *user_data;
 	uint64_t bytes_received;
+	uint64_t samples_received;
 
 	user_data = xfer->user_data;
 	sdi = user_data->sdi;
@@ -779,15 +780,15 @@ static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 		}
 
 		bytes_received = devc->cap.bytes_received + xfer->actual_length;
-		user_data->seq = devc->cap.send_seq;
+		samples_received = bytes_received / devc->channels.n * 8;
 
+		user_data->seq = devc->cap.send_seq;
 		g_thread_pool_push(devc->cap.tr_workers, xfer, NULL);
 
 		devc->cap.bytes_received = bytes_received;
 		devc->cap.send_seq++;
 
-		if (G_UNLIKELY(bytes_received / devc->channels.n * 8 >=
-			       devc->limit_samples)) {
+		if (G_UNLIKELY(samples_received >= devc->limit_samples)) {
 			sr_info("Got enough samples. Transferring capture "
 				"state to HALT.");
 			devc->cap.n_active_data_xfers--;
@@ -956,6 +957,7 @@ static void cap_sample_xfer_fini(const struct sr_dev_inst *sdi)
 	devc->cap.data_xfers = NULL;
 	devc->cap.state = CAP_STATE_INIT;
 	devc->cap.bytes_received = 0;
+	devc->cap.samples_sent = 0;
 }
 
 /**
@@ -1053,6 +1055,45 @@ static void cap_sample_xfer_end(const struct sr_dev_inst *sdi)
 
 /* ===== Capture state machine ===== */
 
+/**
+ * Helper function to send samples and trigger point data to sigrok.
+ */
+static inline void cap_send(struct capture_state *const cap,
+			    const struct sr_dev_inst *const sdi,
+			    struct sample_xfer_user_data *const finished_data)
+{
+	struct sr_datafeed_logic *const logic = &finished_data->logic;
+	uint64_t next_sent, samples, total_len, tp;
+
+	tp = cap->trigger_point_real;
+
+	samples = logic->length / logic->unitsize;
+	next_sent = cap->samples_sent + samples;
+
+	if (G_UNLIKELY(tp > cap->samples_sent && tp < next_sent)) {
+		sr_info("Trigger point hit. Sending trigger info.");
+		total_len = logic->length;
+
+		/* Adjust length of the first packet. */
+		logic->length = (tp - cap->samples_sent) * logic->unitsize;
+
+		/* Send the first packet and trigger packet. */
+		sr_session_send(sdi, &finished_data->packet);
+		std_session_send_df_trigger(sdi);
+
+		/* Make second packet out of the rest of the data. */
+		logic->data = &finished_data->tr_buffer[logic->length];
+		logic->length = total_len - logic->length;
+
+	} else if (G_UNLIKELY(tp == cap->samples_sent)) {
+		/* Prevent zero length logic packet. */
+		std_session_send_df_trigger(sdi);
+	}
+
+	sr_session_send(sdi, &finished_data->packet);
+	cap->samples_sent = next_sent;
+}
+
 static int cap_top_event_handler(int fd, int revents, void *cb_data)
 {
 	const struct sr_dev_inst *sdi;
@@ -1106,7 +1147,7 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 			break;
 		} else {
 			/* Unload the data and resubmit transfer. */
-			sr_session_send(sdi, &finished_data->packet);
+			cap_send(&devc->cap, sdi, finished_data);
 			devc->cap.recv_seq++;
 			xfer_sample_resubmit(finished_xfer, devc);
 			devc->cap.n_active_data_xfers++;
