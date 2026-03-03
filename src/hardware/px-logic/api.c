@@ -481,7 +481,6 @@ static int config_get_general(uint32_t key, GVariant **data,
 	case SR_CONF_CLOCK_EDGE:
 		*data = g_variant_new_string(clock_edges[devc->invert_clock]);
 		break;
-	/* TODO */
 	default:
 		return SR_ERR_NA;
 	}
@@ -556,7 +555,6 @@ static int config_set_general(uint32_t key, GVariant *data,
 			return SR_ERR_ARG;
 		devc->invert_clock = !!idx;
 		break;
-	/* TODO */
 	default:
 		ret = SR_ERR_NA;
 	}
@@ -592,7 +590,6 @@ static int config_set_pwm(uint32_t key, GVariant *data,
 		devc->pwm[index].duty = g_variant_get_double(data);
 		sr_info("PWM0 duty cycle: %f.", devc->pwm[index].duty);
 		break;
-	/* TODO */
 	default:
 		ret = SR_ERR_NA;
 	}
@@ -610,7 +607,6 @@ static int config_list_general(uint32_t key, GVariant **data,
 	ret = SR_OK;
 
 	switch (key) {
-	/* TODO */
 	case SR_CONF_SCAN_OPTIONS:
 	case SR_CONF_DEVICE_OPTIONS:
 		return STD_CONFIG_LIST(key, data, sdi, NULL, scanopts, drvopts,

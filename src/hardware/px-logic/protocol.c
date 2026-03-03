@@ -1108,10 +1108,9 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	(void)fd;
 	(void)revents;
 
-	/* TODO: Terminate on sanity check failures? */
 	sdi = cb_data;
 	if (!sdi)
-		return TRUE;
+		return FALSE;
 
 	drvc = sdi->driver->context;
 	devc = sdi->priv;
@@ -1429,9 +1428,9 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	devc->streaming = mode & MODE_MASK_STREAMING;
 	devc->filter = mode & MODE_MASK_FILTER_EN;
 
-	sr_info("PWM0 conf=%08x, period=%u, duty=%u", pwm0_conf, pwm0_period,
+	sr_info("PWM0 conf=0x%08x, period=%u, duty=%u", pwm0_conf, pwm0_period,
 		pwm0_duty);
-	sr_info("PWM1 conf=%08x, period=%u, duty=%u", pwm1_conf, pwm1_period,
+	sr_info("PWM1 conf=0x%08x, period=%u, duty=%u", pwm1_conf, pwm1_period,
 		pwm1_duty);
 	devc->pwm[0].enabled = !!(pwm0_conf & 1);
 	devc->pwm[0].freq = (double)FPGA_F_PWM / pwm0_period;
