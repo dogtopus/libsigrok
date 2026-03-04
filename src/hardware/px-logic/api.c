@@ -29,6 +29,9 @@
 #define USB_INTERFACE_MAIN 0
 #define USB_INTERFACE_DEBUG 1
 
+#define MCU_CHECK_PERIOD_US 200000
+#define MCU_CHECK_COUNT 25
+
 #define GS SR_GHZ
 
 static const uint32_t scanopts[] = {
@@ -182,7 +185,8 @@ static gboolean process_descriptor(libusb_device *dev, char serial_num[64])
  * @retval SR_OK Device variant was determined and capability set.
  * @retval SR_ERR Caller should abort further instance creation and ignore this device.
  */
-static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
+static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
+			libusb_device *dev)
 {
 	struct sr_usb_dev_inst *usb;
 	struct dev_context *devc;
@@ -212,12 +216,11 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 	result_call = libusb_claim_interface(usb->devhdl, USB_INTERFACE_MAIN);
 	if (result_call == LIBUSB_SUCCESS) {
 		claimed = TRUE;
-		variant = px_logic_get_variant(sdi);
+		variant = px_logic_probe_variant(usb->devhdl);
 
 		/* Change the variant. */
 		devc->config.variant = variant;
 		if (variant == VARIANT_UNKNOWN) {
-			// result = SR_OK;
 			goto done;
 		}
 		if (sdi->model != NULL) {
@@ -261,10 +264,16 @@ static int detect_device_variant(struct sr_dev_inst *sdi, libusb_device *dev)
 		cg->channels = g_slist_append(cg->channels, ch);
 		ch_offset++;
 
-		/* Change device state to INACTIVE to mark that it's ready
-		   for initialization. Device with unknown variant won't have
-		   this transition. */
-		sdi->status = SR_ST_INACTIVE;
+		/* TODO firmware version check. */
+		result_call = px_logic_probe_mcu(drvc->sr_ctx, usb->devhdl);
+		if (result_call == SR_OK) {
+			/* Change device state to INACTIVE to mark that it's
+			   ready to be opened. */
+			sdi->status = SR_ST_INACTIVE;
+		} else if (result_call != SR_ERR_DEV_CLOSED) {
+			/* Other unhandled error. */
+			goto done;
+		}
 
 		result = SR_OK;
 	} else {
@@ -356,15 +365,16 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->config.vid = des.idVendor;
 		devc->config.pid = des.idProduct;
 		devc->voltage_threshold = VREF_DEFAULT;
+		devc->config.speed = libusb_get_device_speed(devlist[i]);
 		sdi->priv = devc;
 
-		res = detect_device_variant(sdi, devlist[i]);
+		res = probe_device(sdi, drvc, devlist[i]);
 		if (res != SR_OK) {
 			g_free(devc);
 			g_free(sdi);
 			continue;
 		}
-		devc->config.speed = libusb_get_device_speed(devlist[i]);
+
 		devices = g_slist_append(devices, sdi);
 	}
 
@@ -377,15 +387,42 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 static int dev_open(struct sr_dev_inst *sdi)
 {
 	struct sr_usb_dev_inst *usb;
-	int ret;
+	struct drv_context *drvc;
+	int ret, fail_count;
+	gboolean reprogram_fpga;
 
 	usb = sdi->conn;
+	drvc = sdi->driver->context;
+	reprogram_fpga = FALSE;
 
-	ret = px_logic_dev_open(sdi);
-	if (ret != SR_OK) {
-		sr_err("Unable to open device.");
-		return SR_ERR;
-	}
+	if (sdi->status == SR_ST_INITIALIZING)
+		sr_info("Waiting for device to reappear...");
+
+	fail_count = 0;
+
+	do {
+		if (fail_count >= MCU_CHECK_COUNT) {
+			sr_err("Timeout waiting for device.");
+			sdi->status = SR_ST_NOT_FOUND;
+			return SR_ERR_TIMEOUT;
+		}
+
+		ret = px_logic_dev_open(sdi);
+		if (sdi->status == SR_ST_INITIALIZING && ret != SR_OK) {
+			fail_count++;
+			g_usleep(MCU_CHECK_PERIOD_US);
+			continue;
+		} else if (ret != SR_OK) {
+			sr_err("Unable to open device.");
+			return SR_ERR;
+		}
+
+		if (sdi->status == SR_ST_INITIALIZING) {
+			sr_info("Device reappeared.");
+			reprogram_fpga = TRUE;
+			sdi->status = SR_ST_INACTIVE;
+		}
+	} while (sdi->status == SR_ST_INITIALIZING);
 
 	ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_MAIN);
 	if (ret != LIBUSB_SUCCESS) {
@@ -407,7 +444,7 @@ static int dev_open(struct sr_dev_inst *sdi)
 	}
 
 	/* FPGA initialization and register pull. */
-	ret = px_logic_fpga_ensure_init(sdi);
+	ret = px_logic_probe_fpga(drvc->sr_ctx, usb->devhdl, reprogram_fpga);
 	if (ret != SR_OK) {
 		return ret;
 	}

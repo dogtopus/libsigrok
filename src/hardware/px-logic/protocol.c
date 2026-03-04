@@ -25,6 +25,7 @@
 
 #define POLL_TIMEOUT BUF_SIZE_MS
 #define REQ_TIMEOUT 1000
+#define MCU_PROGRAM_DELAY 100
 #define FPGA_CHECK_PERIOD_US 10000
 #define FPGA_CHECK_COUNT 200
 
@@ -84,10 +85,11 @@
 #define REG_FWRAM_READ_PAGE 0x2014
 #define REG_FWRAM_WRITE_START 0x2018
 #define REG_FWRAM_WRITE_END 0x201c
-#define REG_FWRAM_WRITE_PAGE 0x2020
+#define REG_FWRAM_WRITE_BANK 0x2020
 #define REG_NUM_SAMPLES_LO 0x2024
 #define REG_NUM_SAMPLES_HI 0x2028
 #define REG_BLOCK_START 0x202c
+#define REG_MCU_RESET 0x2030
 #define REG_MCU_FW_VERSION 0x2034
 #define REG_ENABLED_NUM_CH 0x204c
 #define REG_TRIG_POINT 0x2050
@@ -96,6 +98,11 @@
 
 #define FWRAM_MCU_PROG_FLASH 0
 #define FWRAM_FPGA_CFGRAM 4
+
+#define FWRAM_ADDR_FPGA (0x0)
+#define FWRAM_ADDR_MCU_BOOTLOADER (0x0)
+#define FWRAM_ADDR_MCU_USER (0xc000)
+#define FWRAM_SIZE_MCU_USER (0xc000)
 
 #define MODE_MASK_INIT (1 << 0)
 #define MODE_MASK_STREAMING (1 << 1)
@@ -111,9 +118,11 @@
 #define ALIGN_4K(x) ((x / 4096 + 1) * 4096)
 #define ALIGN_CH(x, ch) ((x / (4096 * ch) + 1) * (4096 * ch))
 
-#define MCU_FW_NAME "SCI_LOGIC.bin"
-#define FPGA_STAGE1_NAME "hspi_ddr_RST.bin"
-#define FPGA_STAGE2_NAME "hspi_ddr.bin"
+#define MCU_FW_NAME "px-logic-mcu.fw"
+#define FPGA_STAGE1_NAME "px-logic-fpga-stage1.fw"
+#define FPGA_STAGE2_NAME "px-logic-fpga-stage2.fw"
+
+#define MCU_FW_VERSION (0x56900027)
 
 struct trigger_status {
 	uint64_t sample_offset;
@@ -186,17 +195,14 @@ static int ep0_get_trigger_status(libusb_device_handle *devhdl,
  * The transmit buffer can overlap with the receive buffer. This allows one to
  * reuse the same buffer as `tx_buf` and `rx_buf`.
  */
-static int reg_ep_trx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
+static int reg_ep_trx(struct libusb_device_handle *devhdl, uint8_t *tx_buf,
 		      uint16_t tx_len, uint8_t *rx_buf, uint16_t rx_len)
 {
-	struct sr_usb_dev_inst *usb;
 	int xfer_result, xfer_count;
 
-	usb = sdi->conn;
-
-	xfer_result = libusb_bulk_transfer(usb->devhdl,
-					   LIBUSB_ENDPOINT_OUT | EP_REG, tx_buf,
-					   tx_len, &xfer_count, REQ_TIMEOUT);
+	xfer_result = libusb_bulk_transfer(devhdl, LIBUSB_ENDPOINT_OUT | EP_REG,
+					   tx_buf, tx_len, &xfer_count,
+					   REQ_TIMEOUT);
 
 	if (xfer_result != LIBUSB_SUCCESS)
 		sr_err("Failed to transmit data to EP_REG: %s.",
@@ -214,9 +220,9 @@ static int reg_ep_trx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
 		return SR_ERR_IO;
 	}
 
-	xfer_result = libusb_bulk_transfer(usb->devhdl,
-					   LIBUSB_ENDPOINT_IN | EP_REG, rx_buf,
-					   rx_len, &xfer_count, REQ_TIMEOUT);
+	xfer_result = libusb_bulk_transfer(devhdl, LIBUSB_ENDPOINT_IN | EP_REG,
+					   rx_buf, rx_len, &xfer_count,
+					   REQ_TIMEOUT);
 
 	if (xfer_result != LIBUSB_SUCCESS)
 		sr_err("Failed to receive data from EP_REG: %s.",
@@ -248,24 +254,20 @@ static int reg_ep_trx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
  * @retval SR_ERR_IO Failed to transmit or receive data.
  * @retval SR_ERR_TIMEOUT Timeout.
  */
-static int fwram_ep_tx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
-		       uint32_t tx_len)
+static int fwram_ep_tx(struct libusb_device_handle *devhdl, uint8_t *tx_buf,
+		       uint32_t tx_len, uint32_t timeout)
 {
-	struct sr_usb_dev_inst *usb;
 	int xfer_result, xfer_count;
 
-	usb = sdi->conn;
-
 	if (tx_len == 0) {
-		libusb_clear_halt(usb->devhdl,
-				  LIBUSB_ENDPOINT_OUT | EP_FIFO_FWRAM);
+		libusb_clear_halt(devhdl, LIBUSB_ENDPOINT_OUT | EP_FIFO_FWRAM);
 		return SR_OK;
 	}
 
-	xfer_result = libusb_bulk_transfer(usb->devhdl,
+	xfer_result = libusb_bulk_transfer(devhdl,
 					   LIBUSB_ENDPOINT_OUT | EP_FIFO_FWRAM,
 					   tx_buf, tx_len, &xfer_count,
-					   REQ_TIMEOUT);
+					   timeout);
 
 	if (xfer_result != LIBUSB_SUCCESS)
 		sr_err("Failed to transmit data to EP_FIFO_FWRAM: %s.",
@@ -285,6 +287,31 @@ static int fwram_ep_tx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
 	return SR_OK;
 }
 
+static int read_reg_raw(struct libusb_device_handle *devhdl, uint32_t address,
+			uint32_t *value)
+{
+	uint8_t trx[16];
+	uint32_t val;
+	int res;
+
+	WL32(trx, REQ_KEY_READ);
+	WL32(&trx[4], REQ_PACKET_LEN);
+	WL32(&trx[8], address);
+	WL32(&trx[12], 0);
+
+	res = reg_ep_trx(devhdl, trx, sizeof(trx), trx, sizeof(trx));
+	if (res != SR_OK) {
+		sr_err("Failed to read register at 0x%x.", address);
+		return res;
+	}
+
+	val = RL32(&trx[12]);
+	sr_spew("reg 0x%04x => 0x%08x", address, val);
+	*value = val;
+
+	return SR_OK;
+}
+
 /**
  * Read control register.
  * 
@@ -298,26 +325,9 @@ static int fwram_ep_tx(const struct sr_dev_inst *sdi, uint8_t *tx_buf,
 static int read_reg(const struct sr_dev_inst *sdi, uint32_t address,
 		    uint32_t *value)
 {
-	uint8_t trx[16];
-	uint32_t val;
-	int res;
+	struct sr_usb_dev_inst *const usb = sdi->conn;
 
-	WL32(trx, REQ_KEY_READ);
-	WL32(&trx[4], REQ_PACKET_LEN);
-	WL32(&trx[8], address);
-	WL32(&trx[12], 0);
-
-	res = reg_ep_trx(sdi, trx, sizeof(trx), trx, sizeof(trx));
-	if (res != SR_OK) {
-		sr_err("Failed to read register at 0x%x.", address);
-		return res;
-	}
-
-	val = RL32(&trx[12]);
-	sr_spew("reg 0x%04x => 0x%08x", address, val);
-	*value = val;
-
-	return SR_OK;
+	return read_reg_raw(usb->devhdl, address, value);
 }
 
 /** Call read_reg() and bubble up the result code if there's an error. */
@@ -329,19 +339,16 @@ static int read_reg(const struct sr_dev_inst *sdi, uint32_t address,
 			return res;                  \
 	}
 
-/**
- * Write control register.
- * 
- * @param[in] sdi Device context.
- * @param[in] address Address.
- * @param[in] value Value.
- *
- * @retval SR_OK Success.
- * @retval SR_ERR_IO reg_ep_trx() fails.
- * @retval SR_ERR_DATA Device returns invalid response.
- */
-static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
-		     uint32_t value)
+#define TRY_READ_REG_RAW(devhdl, address, value)            \
+	{                                                   \
+		int res;                                    \
+		res = read_reg_raw(devhdl, address, value); \
+		if (res != SR_OK)                           \
+			return res;                         \
+	}
+
+static int write_reg_raw(struct libusb_device_handle *devhdl, uint32_t address,
+			 uint32_t value)
 {
 	uint8_t trx[16];
 	int res;
@@ -353,7 +360,7 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 	WL32(&trx[8], address);
 	WL32(&trx[12], value);
 
-	res = reg_ep_trx(sdi, trx, sizeof(trx), trx, sizeof(trx));
+	res = reg_ep_trx(devhdl, trx, sizeof(trx), trx, sizeof(trx));
 	if (res != SR_OK) {
 		sr_err("Failed to write 0x%08x to register at 0x%x.", value,
 		       address);
@@ -371,6 +378,25 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 	return SR_OK;
 }
 
+/**
+ * Write control register.
+ * 
+ * @param[in] sdi Device context.
+ * @param[in] address Address.
+ * @param[in] value Value.
+ *
+ * @retval SR_OK Success.
+ * @retval SR_ERR_IO reg_ep_trx() fails.
+ * @retval SR_ERR_DATA Device returns invalid response.
+ */
+static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
+		     uint32_t value)
+{
+	struct sr_usb_dev_inst *const usb = sdi->conn;
+
+	return write_reg_raw(usb->devhdl, address, value);
+}
+
 /** Call write_reg() and bubble up the result code if there's an error. */
 #define TRY_WRITE_REG(sdi, address, value)            \
 	{                                             \
@@ -379,48 +405,57 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 		if (res != SR_OK)                     \
 			return res;                   \
 	}
+#define TRY_WRITE_REG_RAW(devhdl, address, value)            \
+	{                                                    \
+		int res;                                     \
+		res = write_reg_raw(devhdl, address, value); \
+		if (res != SR_OK)                            \
+			return res;                          \
+	}
 
-static int fpga_program(const struct sr_dev_inst *sdi,
-			const char *bitstream_name)
+static int fwram_program(struct sr_context *sr_ctx,
+			 struct libusb_device_handle *devhdl,
+			 const char *bitstream_name, uint32_t bank,
+			 uint32_t addr, uint32_t erase_size,
+			 const char *log_file_type, uint32_t timeout)
 {
 	struct sr_resource bitstream;
-	struct drv_context *drvc;
 	int res;
 	uint8_t *fw;
 	gsize fw_size_page_aligned;
 
-	drvc = sdi->driver->context;
+	sr_info("Uploading %s file '%s'", log_file_type, bitstream_name);
 
-	sr_info("Uploading FPGA bitstream file '%s'", bitstream_name);
-
-	res = sr_resource_open(drvc->sr_ctx, &bitstream, SR_RESOURCE_FIRMWARE,
+	res = sr_resource_open(sr_ctx, &bitstream, SR_RESOURCE_FIRMWARE,
 			       bitstream_name);
 	if (res != SR_OK) {
 		return res;
 	}
 
-	fw_size_page_aligned = ALIGN_4K(bitstream.size);
+	fw_size_page_aligned = MAX(ALIGN_4K(bitstream.size), erase_size);
 
-	TRY_WRITE_REG(sdi, REG_FWRAM_WRITE_START, 0)
-	TRY_WRITE_REG(sdi, REG_FWRAM_WRITE_END, fw_size_page_aligned)
-	TRY_WRITE_REG(sdi, REG_FWRAM_WRITE_PAGE, FWRAM_FPGA_CFGRAM)
+	TRY_WRITE_REG_RAW(devhdl, REG_FWRAM_WRITE_START, addr);
+	TRY_WRITE_REG_RAW(devhdl, REG_FWRAM_WRITE_END, fw_size_page_aligned);
+	TRY_WRITE_REG_RAW(devhdl, REG_FWRAM_WRITE_BANK, bank);
 
-	fw = g_try_malloc0(fw_size_page_aligned);
+	fw = g_try_malloc(fw_size_page_aligned);
 	if (fw == NULL)
 		return SR_ERR_MALLOC;
 
-	res = sr_resource_read(drvc->sr_ctx, &bitstream, fw, bitstream.size);
+	memset(fw, erase_size == 0 ? 0x00 : 0xff, fw_size_page_aligned);
+
+	res = sr_resource_read(sr_ctx, &bitstream, fw, bitstream.size);
 	if (res <= 0) {
 		sr_err("Failed to read firmware file.");
-		sr_resource_close(drvc->sr_ctx, &bitstream);
+		sr_resource_close(sr_ctx, &bitstream);
 		g_free(fw);
 		return res;
 	}
 
-	sr_resource_close(drvc->sr_ctx, &bitstream);
+	sr_resource_close(sr_ctx, &bitstream);
 
-	fwram_ep_tx(sdi, NULL, 0);
-	res = fwram_ep_tx(sdi, fw, fw_size_page_aligned);
+	fwram_ep_tx(devhdl, NULL, 0, 0);
+	res = fwram_ep_tx(devhdl, fw, fw_size_page_aligned, timeout);
 
 	g_free(fw);
 	fw = NULL;
@@ -431,21 +466,37 @@ static int fpga_program(const struct sr_dev_inst *sdi,
 	return SR_OK;
 }
 
-static gboolean fpga_reg_sanity_check(const struct sr_dev_inst *sdi)
+static int fpga_program(struct sr_context *sr_ctx,
+			struct libusb_device_handle *devhdl,
+			const char *bitstream_name)
+{
+	return fwram_program(sr_ctx, devhdl, bitstream_name, FWRAM_FPGA_CFGRAM,
+			     FWRAM_ADDR_FPGA, 0, "FPGA bitstream", REQ_TIMEOUT);
+}
+
+static int mcu_program(struct sr_context *sr_ctx,
+		       struct libusb_device_handle *devhdl, const char *fw_name)
+{
+	return fwram_program(sr_ctx, devhdl, fw_name, FWRAM_MCU_PROG_FLASH,
+			     FWRAM_ADDR_MCU_USER, FWRAM_SIZE_MCU_USER,
+			     "MCU firmware", MCU_PROGRAM_DELAY);
+}
+
+static gboolean fpga_reg_sanity_check(struct libusb_device_handle *devhdl)
 {
 	int res;
 	uint32_t reg;
 
 	reg = 0xdeadbeef;
 
-	res = read_reg(sdi, REG_CLK_CONF, &reg);
+	res = read_reg_raw(devhdl, REG_CLK_CONF, &reg);
 	if (res != SR_OK)
 		return FALSE;
 
 	if ((reg & ~(CLK_CONF_MASK_SELECT | CLK_CONF_MASK_EDGE)) != 0)
 		return FALSE;
 
-	res = read_reg(sdi, REG_CLK_DIV, &reg);
+	res = read_reg_raw(devhdl, REG_CLK_DIV, &reg);
 	if (res != SR_OK)
 		return FALSE;
 
@@ -453,7 +504,7 @@ static gboolean fpga_reg_sanity_check(const struct sr_dev_inst *sdi)
 	if (reg > 99)
 		return FALSE;
 
-	res = read_reg(sdi, REG_STOP, &reg);
+	res = read_reg_raw(devhdl, REG_STOP, &reg);
 	if (res != SR_OK)
 		return FALSE;
 
@@ -1213,12 +1264,13 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 
 /* ===== Public interface ===== */
 
-SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi)
+SR_PRIV enum device_variant
+px_logic_probe_variant(struct libusb_device_handle *devhdl)
 {
 	uint32_t variant;
 	int result;
 
-	result = read_reg(sdi, REG_DEV_VARIANT, &variant);
+	result = read_reg_raw(devhdl, REG_DEV_VARIANT, &variant);
 	if (result != SR_OK)
 		return VARIANT_UNKNOWN;
 
@@ -1230,30 +1282,65 @@ SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi)
 	return variant;
 }
 
-SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi)
+SR_PRIV int px_logic_probe_mcu(struct sr_context *sr_ctx,
+			       struct libusb_device_handle *devhdl)
+{
+	int res;
+	uint32_t fw_version;
+
+	fw_version = 0;
+
+	TRY_READ_REG_RAW(devhdl, REG_MCU_FW_VERSION, &fw_version);
+	sr_info("MCU firmware version: 0x%08x", fw_version);
+
+	if (fw_version == MCU_FW_VERSION) {
+		sr_info("MCU firmware version is supported. Skip "
+			"MCU programming.");
+		return SR_OK;
+	}
+
+	sr_info("Reprogramming MCU...");
+
+	/* It's normal for the USB controller to stop responding after
+	   this call. Ignoring the timeout result. */
+	res = mcu_program(sr_ctx, devhdl, MCU_FW_NAME);
+	if (res != SR_OK && res != SR_ERR_TIMEOUT) {
+		return res;
+	}
+
+	/* Do not check the response code here, as the device will also
+	   not acknowledge a reset. */
+	write_reg_raw(devhdl, REG_MCU_RESET, 0);
+
+	return SR_ERR_DEV_CLOSED;
+}
+
+SR_PRIV int px_logic_probe_fpga(struct sr_context *sr_ctx,
+				struct libusb_device_handle *devhdl,
+				gboolean reprogram)
 {
 	int res;
 	int fail_count;
 
-	if (fpga_reg_sanity_check(sdi)) {
+	if (!reprogram && fpga_reg_sanity_check(devhdl)) {
 		sr_info("FPGA register config is sane. Skip FPGA initialization.");
 		return SR_OK;
 	}
 
 	sr_info("Initializing FPGA...");
 
-	res = fpga_program(sdi, FPGA_STAGE1_NAME);
+	res = fpga_program(sr_ctx, devhdl, FPGA_STAGE1_NAME);
 	if (res != SR_OK)
 		return res;
 
-	res = fpga_program(sdi, FPGA_STAGE2_NAME);
+	res = fpga_program(sr_ctx, devhdl, FPGA_STAGE2_NAME);
 	if (res != SR_OK)
 		return res;
 
 	res = SR_ERR_TIMEOUT;
 	/* Wait until FPGA is fully configured. */
 	for (fail_count = 0; fail_count < FPGA_CHECK_COUNT; fail_count++) {
-		if (fpga_reg_sanity_check(sdi)) {
+		if (fpga_reg_sanity_check(devhdl)) {
 			res = SR_OK;
 			break;
 		}
@@ -1278,13 +1365,11 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 	struct dev_context *devc;
 	struct drv_context *drvc;
 	int ret = SR_ERR, i, device_count;
-	uint32_t fw_version;
 	char connection_id[64];
 
 	drvc = di->context;
 	devc = sdi->priv;
 	usb = sdi->conn;
-	fw_version = 0;
 
 	device_count =
 		libusb_get_device_list(drvc->sr_ctx->libusb_ctx, &devlist);
@@ -1313,7 +1398,8 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 				continue;
 		}
 
-		if (!(ret = libusb_open(devlist[i], &usb->devhdl))) {
+		ret = libusb_open(devlist[i], &usb->devhdl);
+		if (ret == LIBUSB_SUCCESS) {
 			if (usb->address == 0xff)
 				/*
 				 * First time we touch this device after FW
@@ -1321,19 +1407,17 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 				 */
 				usb->address =
 					libusb_get_device_address(devlist[i]);
+		} else if (ret == LIBUSB_ERROR_NO_DEVICE) {
+			/* Do not log device not found error as it may come up
+			   when waiting for device to reboot. */
+			ret = SR_ERR;
+			break;
 		} else {
 			sr_err("Failed to open device: %s.",
 			       libusb_error_name(ret));
 			ret = SR_ERR;
 			break;
 		}
-
-		/* Check version */
-		ret = read_reg(sdi, REG_MCU_FW_VERSION, &fw_version);
-		if (ret != SR_OK)
-			break;
-
-		sr_info("MCU Version: 0x%08x", fw_version);
 
 		ret = SR_OK;
 

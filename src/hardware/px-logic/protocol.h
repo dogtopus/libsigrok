@@ -138,13 +138,27 @@ struct dev_context {
 	struct capture_state cap;
 };
 
-SR_PRIV enum device_variant px_logic_get_variant(const struct sr_dev_inst *sdi);
+SR_PRIV enum device_variant
+px_logic_probe_variant(struct libusb_device_handle *devhdl);
+
+SR_PRIV int px_logic_probe_mcu(struct sr_context *sr_ctx,
+			       struct libusb_device_handle *devhdl);
+
+SR_PRIV int px_logic_probe_fpga(struct sr_context *sr_ctx,
+				struct libusb_device_handle *devhdl,
+				gboolean reprogram);
+
 SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi);
-SR_PRIV int px_logic_fpga_ensure_init(const struct sr_dev_inst *sdi);
+
 SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi);
+
 SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi);
-SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi, uint8_t channel);
+
+SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
+				     uint8_t channel);
+
 SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi);
+
 SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi);
 
 #endif
