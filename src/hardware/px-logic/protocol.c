@@ -415,24 +415,23 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 
 static int fwram_program(struct sr_context *sr_ctx,
 			 struct libusb_device_handle *devhdl,
-			 const char *bitstream_name, uint32_t bank,
-			 uint32_t addr, uint32_t erase_size,
-			 const char *log_file_type, uint32_t timeout)
+			 const char *fw_name, uint32_t bank, uint32_t addr,
+			 uint32_t erase_size, const char *log_file_type,
+			 uint32_t timeout)
 {
-	struct sr_resource bitstream;
+	struct sr_resource fw_file;
 	int res;
 	uint8_t *fw;
-	gsize fw_size_page_aligned;
+	size_t fw_size_page_aligned;
 
-	sr_info("Uploading %s file '%s'", log_file_type, bitstream_name);
+	sr_info("Uploading %s file '%s'", log_file_type, fw_name);
 
-	res = sr_resource_open(sr_ctx, &bitstream, SR_RESOURCE_FIRMWARE,
-			       bitstream_name);
+	res = sr_resource_open(sr_ctx, &fw_file, SR_RESOURCE_FIRMWARE, fw_name);
 	if (res != SR_OK) {
 		return res;
 	}
 
-	fw_size_page_aligned = MAX(ALIGN_4K(bitstream.size), erase_size);
+	fw_size_page_aligned = MAX(ALIGN_4K(fw_file.size), erase_size);
 
 	TRY_WRITE_REG_RAW(devhdl, REG_FWRAM_WRITE_START, addr);
 	TRY_WRITE_REG_RAW(devhdl, REG_FWRAM_WRITE_END, fw_size_page_aligned);
@@ -444,15 +443,15 @@ static int fwram_program(struct sr_context *sr_ctx,
 
 	memset(fw, erase_size == 0 ? 0x00 : 0xff, fw_size_page_aligned);
 
-	res = sr_resource_read(sr_ctx, &bitstream, fw, bitstream.size);
+	res = sr_resource_read(sr_ctx, &fw_file, fw, fw_file.size);
 	if (res <= 0) {
 		sr_err("Failed to read firmware file.");
-		sr_resource_close(sr_ctx, &bitstream);
+		sr_resource_close(sr_ctx, &fw_file);
 		g_free(fw);
 		return res;
 	}
 
-	sr_resource_close(sr_ctx, &bitstream);
+	sr_resource_close(sr_ctx, &fw_file);
 
 	fwram_ep_tx(devhdl, NULL, 0, 0);
 	res = fwram_ep_tx(devhdl, fw, fw_size_page_aligned, timeout);
@@ -520,16 +519,18 @@ static gboolean fpga_reg_sanity_check(struct libusb_device_handle *devhdl)
 
 static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
+	const uint32_t buf_depth = devc->config.max_buffer_depth;
+	const uint64_t capture_ratio = devc->capture_ratio;
+	const uint64_t limit_samples = devc->limit_samples;
+
 	struct sr_trigger *trigger;
 	struct sr_trigger_stage *stage;
 	struct sr_trigger_match *match;
 	const GSList *l, *m;
 	uint32_t mask;
-	uint32_t trigger_point, max_trigger_percent;
-	uint64_t depth_per_channel;
-
-	devc = sdi->priv;
+	uint32_t tp, max_trigger_percent;
+	uint64_t depth_per_ch;
 
 	trigger = sr_session_trigger_get(sdi->session);
 
@@ -539,20 +540,16 @@ static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 	}
 
 	if (devc->channels.n == 0)
-		depth_per_channel = 0;
+		depth_per_ch = 0;
 	else
-		depth_per_channel =
-			(devc->config.max_buffer_depth / devc->channels.n) &
-			0xfffffc00;
+		depth_per_ch = (buf_depth / devc->channels.n) & 0xfffffc00;
 
 	max_trigger_percent = devc->streaming ? 10 : MAX_TRIG_PERCENT;
 
-	trigger_point = MAX(STRIPE_SIZE_BYTES,
-			    devc->capture_ratio * devc->limit_samples / 100);
-	trigger_point = MIN(depth_per_channel * max_trigger_percent / 100,
-			    trigger_point);
+	tp = MAX(STRIPE_SIZE_BYTES, capture_ratio * limit_samples / 100);
+	tp = MIN(depth_per_ch * max_trigger_percent / 100, tp);
 
-	devc->trigger.point = trigger_point;
+	devc->trigger.point = tp;
 
 	for (l = trigger->stages; l; l = l->next) {
 		stage = l->data;
@@ -590,14 +587,13 @@ static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 
 static int conf_set_vref(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
+	const double vth = devc->voltage_threshold;
+
 	uint32_t period, duty;
 
-	devc = sdi->priv;
-
 	period = FPGA_F_PWM_VREF / FPGA_PWM_VREF_PERIOD;
-	duty = ((devc->voltage_threshold * FPGA_INPUT_VDIV) / FPGA_VCCIO) *
-	       period;
+	duty = ((vth * FPGA_INPUT_VDIV) / FPGA_VCCIO) * period;
 
 	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_PERIOD, period);
 	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_DUTY, duty);
@@ -608,12 +604,12 @@ static int conf_set_vref(const struct sr_dev_inst *sdi)
 static struct channel_config
 conf_compute_channel_config(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
+
 	struct sr_channel *channel;
 	GSList *l;
 	struct channel_config res;
 
-	devc = sdi->priv;
 	res.n = 0;
 	res.mask = 0;
 
@@ -645,11 +641,10 @@ static uint32_t conf_compute_buf_size(enum libusb_speed speed,
 
 static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
+
 	uint32_t clk_conf, clk_div;
 	gboolean found;
-
-	devc = sdi->priv;
 
 	if (devc->samplerate < SR_MHZ(100)) {
 		clk_conf = CLK_100MHZ;
@@ -700,12 +695,13 @@ static void cap_halt(struct dev_context *devc)
 
 static int cap_data_init(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
+
 	size_t tr_pool_size;
 	int8_t max_enabled_channel, i;
 	uint32_t mask;
+	uint8_t sample_width;
 
-	devc = sdi->priv;
 	max_enabled_channel = -1;
 
 	for (mask = devc->channels.mask, i = 0; i < 32 && mask != 0;
@@ -716,23 +712,25 @@ static int cap_data_init(const struct sr_dev_inst *sdi)
 	}
 
 	if (max_enabled_channel < 8)
-		devc->cap.sample_width = 1;
+		sample_width = 1;
 	else if (max_enabled_channel >= 8 && max_enabled_channel < 16)
-		devc->cap.sample_width = 2;
+		sample_width = 2;
 	else if (max_enabled_channel >= 16 && max_enabled_channel < 24)
-		devc->cap.sample_width = 3;
+		sample_width = 3;
 	else
-		devc->cap.sample_width = 4;
+		sample_width = 4;
+
+	devc->cap.sample_width = sample_width;
 
 	sr_info("Highest channel is %d", max_enabled_channel);
-	sr_info("Use sample width of %u", devc->cap.sample_width);
+	sr_info("Use sample width of %u", sample_width);
 
 	devc->cap.skip_trigger =
 		!(devc->trigger.low_mask | devc->trigger.high_mask |
 		  devc->trigger.rising_mask | devc->trigger.falling_mask);
 
 	devc->cap.tr_buffer_size =
-		devc->buf_size / devc->channels.n * 8 * devc->cap.sample_width;
+		devc->buf_size / devc->channels.n * 8 * sample_width;
 	tr_pool_size = devc->cap.tr_buffer_size * NUM_SIMUL_XFERS;
 
 	sr_spew("%s: Allocating %zu bytes for transpose buffer", __func__,
@@ -757,8 +755,7 @@ static int cap_data_init(const struct sr_dev_inst *sdi)
 
 static void cap_data_fini(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
-	devc = sdi->priv;
+	struct dev_context *const devc = sdi->priv;
 
 	g_thread_pool_free(devc->cap.tr_workers, TRUE, TRUE);
 	devc->cap.tr_workers = NULL;
@@ -791,15 +788,12 @@ static void xfer_sample_resubmit(struct libusb_transfer *xfer,
 
 static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 {
-	const struct sr_dev_inst *sdi;
-	struct dev_context *devc;
-	struct sample_xfer_user_data *user_data;
+	struct sample_xfer_user_data *const user_data = xfer->user_data;
+	const struct sr_dev_inst *const sdi = user_data->sdi;
+	struct dev_context *const devc = sdi->priv;
+
 	uint64_t bytes_received;
 	uint64_t samples_received;
-
-	user_data = xfer->user_data;
-	sdi = user_data->sdi;
-	devc = sdi->priv;
 
 	switch (xfer->status) {
 	case LIBUSB_TRANSFER_CANCELLED:
@@ -991,10 +985,9 @@ static void xfer_sample_transpose_worker(gpointer data, gpointer user_data)
  */
 static void cap_sample_xfer_fini(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
-	int i;
+	struct dev_context *const devc = sdi->priv;
 
-	devc = sdi->priv;
+	int i;
 
 	if (devc->cap.data_xfers == NULL) {
 		devc->cap.state = CAP_STATE_INIT;
@@ -1020,14 +1013,13 @@ static void cap_sample_xfer_fini(const struct sr_dev_inst *sdi)
  */
 static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
-	struct sr_usb_dev_inst *usb;
+	struct dev_context *const devc = sdi->priv;
+	struct capture_state *const cap = &devc->cap;
+	struct sr_usb_dev_inst *const usb = sdi->conn;
+
 	struct sample_xfer_user_data *user_data;
 	unsigned char *xfer_buf;
 	int i;
-
-	devc = sdi->priv;
-	usb = sdi->conn;
 
 	devc->cap.data_xfers = g_try_malloc0(sizeof(struct libusb_transfer *) *
 					     NUM_SIMUL_XFERS);
@@ -1051,8 +1043,7 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 		user_data = g_malloc0(sizeof(*user_data));
 
 		user_data->sdi = sdi;
-		user_data->tr_buffer =
-			&devc->cap.tr_buffer[devc->cap.tr_buffer_size * i];
+		user_data->tr_buffer = &cap->tr_buffer[cap->tr_buffer_size * i];
 
 		libusb_fill_bulk_transfer(
 			devc->cap.data_xfers[i], usb->devhdl,
@@ -1092,16 +1083,16 @@ static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
  */
 static void cap_sample_xfer_end(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
+	struct capture_state *const cap = &devc->cap;
+
 	uint32_t i;
 
-	devc = sdi->priv;
-
-	if (devc->cap.data_xfers == NULL)
+	if (cap->data_xfers == NULL)
 		return;
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
-		struct libusb_transfer *xfer = devc->cap.data_xfers[i];
+		struct libusb_transfer *xfer = cap->data_xfers[i];
 		if (xfer != NULL) {
 			libusb_cancel_transfer(xfer);
 		}
@@ -1118,6 +1109,7 @@ static inline void cap_send(struct capture_state *const cap,
 			    struct sample_xfer_user_data *const finished_data)
 {
 	struct sr_datafeed_logic *const logic = &finished_data->logic;
+
 	uint64_t next_sent, samples, total_len, tp;
 
 	tp = cap->trigger_point_real;
@@ -1156,10 +1148,12 @@ send:
 
 static int cap_top_event_handler(int fd, int revents, void *cb_data)
 {
-	const struct sr_dev_inst *sdi;
-	struct drv_context *drvc;
-	struct sr_usb_dev_inst *usb;
-	struct dev_context *devc;
+	const struct sr_dev_inst *const sdi = cb_data;
+	struct drv_context *const drvc = sdi->driver->context;
+	struct sr_usb_dev_inst *const usb = sdi->conn;
+	struct dev_context *const devc = sdi->priv;
+	struct capture_state *const cap = &devc->cap;
+
 	struct trigger_status status;
 	struct libusb_transfer *finished_xfer;
 	struct sample_xfer_user_data *finished_data;
@@ -1168,16 +1162,6 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	(void)fd;
 	(void)revents;
 
-	sdi = cb_data;
-	if (!sdi)
-		return FALSE;
-
-	drvc = sdi->driver->context;
-	devc = sdi->priv;
-	usb = sdi->conn;
-	if (!devc || !drvc || !usb)
-		return TRUE;
-
 	/* libusb event handler. */
 	memset(&tv, 0, sizeof(tv));
 	libusb_handle_events_timeout_completed(drvc->sr_ctx->libusb_ctx, &tv,
@@ -1185,37 +1169,36 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 
 	/* Sample transpose output queue handler. */
 	/* Acquire lock to prevent sequence inversion. */
-	g_async_queue_lock(devc->cap.tr_out_queue);
+	g_async_queue_lock(cap->tr_out_queue);
 
 	while ((finished_xfer = g_async_queue_try_pop_unlocked(
-			devc->cap.tr_out_queue)) != NULL) {
+			cap->tr_out_queue)) != NULL) {
 		finished_data = finished_xfer->user_data;
-		if (G_UNLIKELY(devc->cap.recv_seq != 0 &&
-			       finished_data->seq < devc->cap.recv_seq)) {
+		if (G_UNLIKELY(cap->recv_seq != 0 &&
+			       finished_data->seq < cap->recv_seq)) {
 			sr_err("Sequence inversion detected. Aborting "
 			       "session.");
 			cap_halt(devc);
 			break;
-		} else if (G_UNLIKELY(finished_data->seq !=
-				      devc->cap.recv_seq)) {
+		} else if (G_UNLIKELY(finished_data->seq != cap->recv_seq)) {
 			/* Rollback previous pop operation. */
 			sr_info("Task %" PRIu64 " completed out of order.",
 				finished_data->seq);
-			g_async_queue_push_front_unlocked(
-				devc->cap.tr_out_queue, finished_xfer);
+			g_async_queue_push_front_unlocked(cap->tr_out_queue,
+							  finished_xfer);
 			break;
 		} else {
 			/* Unload the data and resubmit transfer. */
 			cap_send(&devc->cap, sdi, finished_data);
-			devc->cap.recv_seq++;
+			cap->recv_seq++;
 			xfer_sample_resubmit(finished_xfer, devc);
-			devc->cap.n_active_data_xfers++;
+			cap->n_active_data_xfers++;
 		}
 	}
 
-	g_async_queue_unlock(devc->cap.tr_out_queue);
+	g_async_queue_unlock(cap->tr_out_queue);
 
-	switch (devc->cap.state) {
+	switch (cap->state) {
 	case CAP_STATE_WAIT_TRIGGER:
 		/* Continue to wait for trigger condition if trigger hasn't
 		   been fired yet. */
@@ -1230,8 +1213,8 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 				" state to SAMPLE_XFER.",
 				status.sample_offset, status.pos_real,
 				status.activated);
-			devc->cap.state = CAP_STATE_SAMPLE_XFER;
-			devc->cap.trigger_point_real = status.pos_real;
+			cap->state = CAP_STATE_SAMPLE_XFER;
+			cap->trigger_point_real = status.pos_real;
 			std_session_send_df_header(sdi);
 			cap_sample_xfer_begin(sdi);
 		}
@@ -1239,12 +1222,12 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	case CAP_STATE_HALT:
 		cap_sample_xfer_end(sdi);
 		sr_info("%s: Transferring capture state to CLEANUP.", __func__);
-		devc->cap.state = CAP_STATE_CLEANUP;
+		cap->state = CAP_STATE_CLEANUP;
 		break;
 	case CAP_STATE_CLEANUP:
 		/* Make sure all the transfers stop before proceeding. */
-		if (devc->cap.n_active_data_xfers != 0 ||
-		    devc->cap.send_seq != devc->cap.recv_seq) {
+		if (cap->n_active_data_xfers != 0 ||
+		    cap->send_seq != cap->recv_seq) {
 			break;
 		}
 		/* Destroy resources. */
@@ -1355,24 +1338,20 @@ SR_PRIV int px_logic_probe_fpga(struct sr_context *sr_ctx,
 
 SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 {
-	struct sr_dev_driver *di;
-
-	di = sdi->driver;
+	struct sr_usb_dev_inst *const usb = sdi->conn;
+	struct sr_dev_driver *const di = sdi->driver;
+	struct drv_context *const drvc = di->context;
+	struct sr_context *const ctx = drvc->sr_ctx;
+	struct dev_context *const devc = sdi->priv;
 
 	libusb_device **devlist;
-	struct sr_usb_dev_inst *usb;
+
 	struct libusb_device_descriptor des;
-	struct dev_context *devc;
-	struct drv_context *drvc;
+
 	int ret = SR_ERR, i, device_count;
 	char connection_id[64];
 
-	drvc = di->context;
-	devc = sdi->priv;
-	usb = sdi->conn;
-
-	device_count =
-		libusb_get_device_list(drvc->sr_ctx->libusb_ctx, &devlist);
+	device_count = libusb_get_device_list(ctx->libusb_ctx, &devlist);
 	if (device_count < 0) {
 		sr_err("Failed to get device list: %s.",
 		       libusb_error_name(device_count));
@@ -1431,13 +1410,12 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 
 SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
+
 	uint32_t clk_conf, clk_select, clk_div, mode, num_samples_lo,
 		num_samples_hi, pwm0_conf, pwm0_period, pwm0_duty, pwm1_conf,
 		pwm1_period, pwm1_duty;
 	uint64_t samplerate;
-
-	devc = sdi->priv;
 
 	clk_conf = 0;
 	clk_select = 0;
@@ -1537,11 +1515,9 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 
 SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
 	int ret;
 	uint32_t mode_reg;
-
-	devc = sdi->priv;
 
 	devc->channels = conf_compute_channel_config(sdi);
 	devc->buf_size = conf_compute_buf_size(
@@ -1610,6 +1586,7 @@ SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
 				     uint8_t channel)
 {
 	struct dev_context *const devc = sdi->priv;
+
 	uint32_t period, duty;
 
 	if (channel >= 2) {
@@ -1642,10 +1619,8 @@ SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
 
 SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
 	int res;
-
-	devc = sdi->priv;
 
 	res = px_logic_send_config(sdi);
 	if (res != SR_OK) {
@@ -1681,11 +1656,10 @@ SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi)
 
 SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
 
 	sr_info("%s: Transferring capture state to HALT.", __func__);
 
-	devc = sdi->priv;
 	cap_halt(devc);
 
 	return SR_OK;

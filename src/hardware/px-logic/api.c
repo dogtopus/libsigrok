@@ -188,8 +188,9 @@ static gboolean process_descriptor(libusb_device *dev, char serial_num[64])
 static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
 			libusb_device *dev)
 {
-	struct sr_usb_dev_inst *usb;
-	struct dev_context *devc;
+	struct sr_usb_dev_inst *const usb = sdi->conn;
+	struct dev_context *const devc = sdi->priv;
+
 	struct sr_channel *ch;
 	struct sr_channel_group *cg;
 	int result_call, result;
@@ -197,9 +198,6 @@ static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
 	enum device_variant variant;
 	gboolean claimed;
 	char name[8];
-
-	usb = sdi->conn;
-	devc = sdi->priv;
 
 	/* Make a temporary connection to send register read request. */
 	result_call = libusb_open(dev, &usb->devhdl);
@@ -386,13 +384,11 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 
 static int dev_open(struct sr_dev_inst *sdi)
 {
-	struct sr_usb_dev_inst *usb;
-	struct drv_context *drvc;
+	struct sr_usb_dev_inst *const usb = sdi->conn;
+	struct drv_context *const drvc = sdi->driver->context;
 	int ret, fail_count;
 	gboolean reprogram_fpga;
 
-	usb = sdi->conn;
-	drvc = sdi->driver->context;
 	reprogram_fpga = FALSE;
 
 	if (sdi->status == SR_ST_INITIALIZING)
@@ -459,9 +455,7 @@ static int dev_open(struct sr_dev_inst *sdi)
 
 static int dev_close(struct sr_dev_inst *sdi)
 {
-	struct sr_usb_dev_inst *usb;
-
-	usb = sdi->conn;
+	struct sr_usb_dev_inst *const usb = sdi->conn;
 
 	if (!usb->devhdl)
 		return SR_ERR_BUG;
@@ -478,11 +472,10 @@ static int dev_close(struct sr_dev_inst *sdi)
 static int config_get_general(uint32_t key, GVariant **data,
 			      const struct sr_dev_inst *sdi)
 {
-	struct sr_usb_dev_inst *usb;
-	struct dev_context *devc;
-	int ret;
+	struct dev_context *const devc = sdi->priv;
 
-	devc = sdi->priv;
+	struct sr_usb_dev_inst *usb;
+	int ret;
 
 	ret = SR_OK;
 	switch (key) {
@@ -528,10 +521,9 @@ static int config_get_general(uint32_t key, GVariant **data,
 static int config_get_pwm(uint32_t key, GVariant **data,
 			  const struct sr_dev_inst *sdi, uint8_t index)
 {
-	struct dev_context *devc;
-	int ret;
+	struct dev_context *const devc = sdi->priv;
 
-	devc = sdi->priv;
+	int ret;
 
 	if (index >= 2) {
 		return SR_ERR_ARG;
@@ -558,12 +550,10 @@ static int config_get_pwm(uint32_t key, GVariant **data,
 static int config_set_general(uint32_t key, GVariant *data,
 			      const struct sr_dev_inst *sdi)
 {
-	int ret;
-	struct dev_context *devc;
-	double l, h;
-	int idx;
+	struct dev_context *const devc = sdi->priv;
 
-	devc = sdi->priv;
+	int ret, idx;
+	double l, h;
 
 	ret = SR_OK;
 	switch (key) {
@@ -603,9 +593,7 @@ static int config_set_pwm(uint32_t key, GVariant *data,
 			  const struct sr_dev_inst *sdi, uint8_t index)
 {
 	int ret;
-	struct dev_context *devc;
-
-	devc = sdi->priv;
+	struct dev_context *const devc = sdi->priv;
 
 	if (index >= 2) {
 		return SR_ERR_ARG;
@@ -638,9 +626,8 @@ static int config_list_general(uint32_t key, GVariant **data,
 			       const struct sr_dev_inst *sdi)
 {
 	int ret;
-	struct dev_context *devc;
+	struct dev_context *const devc = sdi->priv;
 
-	devc = sdi->priv;
 	ret = SR_OK;
 
 	switch (key) {
