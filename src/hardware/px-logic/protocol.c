@@ -181,7 +181,7 @@ static int ep0_get_trigger_status(libusb_device_handle *devhdl,
 
 /**
  * Do a roundtrip transaction over the control register access endpoint.
- * 
+ *
  * @param[in] sdi Device context.
  * @param[in] tx_buf Transmit buffer.
  * @param[in] tx_len Amount of bytes to transmit.
@@ -215,7 +215,8 @@ static int reg_ep_trx(struct libusb_device_handle *devhdl, uint8_t *tx_buf,
 	}
 
 	if (xfer_count != tx_len) {
-		sr_err("Incomplete data transmitted to EP_REG: expecting %dB, actually sent %dB.",
+		sr_err("Incomplete data transmitted to EP_REG: "
+		       "expecting %dB, actually sent %dB.",
 		       tx_len, xfer_count);
 		return SR_ERR_IO;
 	}
@@ -234,7 +235,8 @@ static int reg_ep_trx(struct libusb_device_handle *devhdl, uint8_t *tx_buf,
 		return SR_ERR_IO;
 
 	if (xfer_count != rx_len) {
-		sr_err("Incomplete data received from EP_REG: expecting %dB, actually got %dB.",
+		sr_err("Incomplete data received from EP_REG: "
+		       "expecting %dB, actually got %dB.",
 		       tx_len, xfer_count);
 		return SR_ERR_IO;
 	}
@@ -244,7 +246,7 @@ static int reg_ep_trx(struct libusb_device_handle *devhdl, uint8_t *tx_buf,
 
 /**
  * Transmit data to the firmware RAM FIFO endpoint.
- * 
+ *
  * @param[in] sdi Device context.
  * @param[in] tx_buf Transmit buffer.
  * @param[in] tx_len Amount of bytes to transmit. If 0, clears the STALL
@@ -279,7 +281,8 @@ static int fwram_ep_tx(struct libusb_device_handle *devhdl, uint8_t *tx_buf,
 		return SR_ERR_IO;
 
 	if ((uint32_t)(xfer_count & 0x7fffffff) != tx_len) {
-		sr_err("Incomplete data transmitted to EP_FIFO_FWRAM: expecting %dB, actually sent %dB.",
+		sr_err("Incomplete data transmitted to EP_FIFO_FWRAM: "
+		       "expecting %dB, actually sent %dB.",
 		       tx_len, xfer_count);
 		return SR_ERR_IO;
 	}
@@ -287,6 +290,9 @@ static int fwram_ep_tx(struct libusb_device_handle *devhdl, uint8_t *tx_buf,
 	return SR_OK;
 }
 
+/**
+ * Read control register through a device handle.
+ */
 static int read_reg_raw(struct libusb_device_handle *devhdl, uint32_t address,
 			uint32_t *value)
 {
@@ -314,7 +320,7 @@ static int read_reg_raw(struct libusb_device_handle *devhdl, uint32_t address,
 
 /**
  * Read control register.
- * 
+ *
  * @param[in] sdi Device context.
  * @param[in] address Address.
  * @param[out] value Value.
@@ -347,6 +353,9 @@ static int read_reg(const struct sr_dev_inst *sdi, uint32_t address,
 			return res;                         \
 	}
 
+/**
+ * Write control register through a device handle.
+ */
 static int write_reg_raw(struct libusb_device_handle *devhdl, uint32_t address,
 			 uint32_t value)
 {
@@ -380,7 +389,7 @@ static int write_reg_raw(struct libusb_device_handle *devhdl, uint32_t address,
 
 /**
  * Write control register.
- * 
+ *
  * @param[in] sdi Device context.
  * @param[in] address Address.
  * @param[in] value Value.
@@ -413,6 +422,21 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 			return res;                          \
 	}
 
+/**
+ * Write data to FWRAM.
+ *
+ * @param[in] sr_ctx
+ * @param[in] devhdl
+ * @param[in] fw_name
+ * @param[in] bank FWRAM bank number.
+ * @param[in] addr FWRAM base address for writing.
+ * @param[in] erase_size Generate erase pattern (0xff fill) of this size.
+ * @param[in] log_file_type File type string used for logging.
+ * @param[in] timeout FIFO TX timeout.
+ *
+ * @retval SR_OK
+ * @retval SR_ERR_MALLOC
+ */
 static int fwram_program(struct sr_context *sr_ctx,
 			 struct libusb_device_handle *devhdl,
 			 const char *fw_name, uint32_t bank, uint32_t addr,
@@ -481,6 +505,15 @@ static int mcu_program(struct sr_context *sr_ctx,
 			     "MCU firmware", MCU_PROGRAM_DELAY);
 }
 
+/**
+ * Check FPGA register sanity.
+ *
+ * Currently this checks REG_CLK_CONF, REG_CLK_DIV and REG_STOP to determine
+ * whether or not the FPGA bitstream has likely been uploaded.
+ *
+ * @param[in] devhdl
+ * @return gboolean
+ */
 static gboolean fpga_reg_sanity_check(struct libusb_device_handle *devhdl)
 {
 	int res;
@@ -517,6 +550,14 @@ static gboolean fpga_reg_sanity_check(struct libusb_device_handle *devhdl)
 
 /* ===== Device configuration helpers ===== */
 
+/**
+ * Convert and cache trigger-related register configuration from sigrok trigger
+ * and capture ratio configuration. Note that this does not upload these values
+ * to the FPGA, but merely prepare them.
+ *
+ * @param[in] sdi
+ * @retval SR_OK
+ */
 static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *const devc = sdi->priv;
@@ -585,6 +626,14 @@ static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+/**
+ * Convert and upload reference voltage PWM DAC configuration.
+ *
+ * These values are not used anywhere else, so they are not saved.
+ *
+ * @param[in] sdi
+ * @retval SR_OK
+ */
 static int conf_set_vref(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *const devc = sdi->priv;
@@ -601,6 +650,12 @@ static int conf_set_vref(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+/**
+ * Extract channel enablement status from the sigrok channel configuration.
+ *
+ * @param[in] sdi
+ * @return Number of enabled channels and a bitmask of enabled channels.
+ */
 static struct channel_config
 conf_compute_channel_config(const struct sr_dev_inst *sdi)
 {
@@ -624,6 +679,17 @@ conf_compute_channel_config(const struct sr_dev_inst *sdi)
 	return res;
 }
 
+/**
+ * Calculate buffer size based on capture configuration.
+ *
+ * Buffer size is currently set to approximately 10ms, aligned to both RAM page
+ * size (4KiB) and frame size (num of channels * stripe size).
+ *
+ * @param[in] speed SuperSpeed or HighSpeed.
+ * @param[in] samplerate
+ * @param[in] nchannels
+ * @return Calculated buffer size.
+ */
 static uint32_t conf_compute_buf_size(enum libusb_speed speed,
 				      uint64_t samplerate, uint32_t nchannels)
 {
@@ -639,6 +705,13 @@ static uint32_t conf_compute_buf_size(enum libusb_speed speed,
 	return final;
 }
 
+/**
+ * Configure sampler clock.
+ *
+ * @param[in] sdi
+ * @retval SR_OK
+ * @retval SR_ERR_ARG
+ */
 static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *const devc = sdi->priv;
@@ -831,6 +904,7 @@ static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 		bytes_received = devc->cap.bytes_received + xfer->actual_length;
 		samples_received = bytes_received / devc->channels.n * 8;
 
+		/* Submit to the sample transpose thread pool. */
 		user_data->seq = devc->cap.send_seq;
 		g_thread_pool_push(devc->cap.tr_workers, xfer, NULL);
 
@@ -881,7 +955,7 @@ static int xfer_sample_cmp(gconstpointer a, gconstpointer b, gpointer user_data)
  * to
  *
  * `abcd...abcd...abcd...`
- * 
+ *
  * @param src Samples in striped channels format.
  *
  * @param length Total length of the samples in bytes. Must be aligned to 64

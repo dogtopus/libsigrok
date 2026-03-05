@@ -366,6 +366,11 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->config.speed = libusb_get_device_speed(devlist[i]);
 		sdi->priv = devc;
 
+		if (devc->config.speed != LIBUSB_SPEED_SUPER) {
+			sr_warn("USB not running in SuperSpeed mode. Expect "
+				"degraded performance.");
+		}
+
 		res = probe_device(sdi, drvc, devlist[i]);
 		if (res != SR_OK) {
 			g_free(devc);
