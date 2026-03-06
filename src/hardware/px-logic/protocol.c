@@ -82,7 +82,7 @@
 #define REG_XFER_BUFFER_SIZE 0x2008
 #define REG_FWRAM_READ_START 0x200c
 #define REG_FWRAM_READ_END 0x2010
-#define REG_FWRAM_READ_PAGE 0x2014
+#define REG_FWRAM_READ_BANK 0x2014
 #define REG_FWRAM_WRITE_START 0x2018
 #define REG_FWRAM_WRITE_END 0x201c
 #define REG_FWRAM_WRITE_BANK 0x2020
@@ -644,7 +644,7 @@ static int conf_set_vref(const struct sr_dev_inst *sdi)
 	period = FPGA_F_PWM_VREF / FPGA_PWM_VREF_PERIOD;
 	duty = ((vth * FPGA_INPUT_VDIV) / FPGA_VCCIO) * period;
 
-	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_PERIOD, period);
+	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_PERIOD, period - 1);
 	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_DUTY, duty);
 
 	return SR_OK;
@@ -1578,11 +1578,11 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	sr_info("PWM1 conf=0x%08x, period=%u, duty=%u", pwm1_conf, pwm1_period,
 		pwm1_duty);
 	devc->pwm[0].enabled = !!(pwm0_conf & 1);
-	devc->pwm[0].freq = (double)FPGA_F_PWM / pwm0_period;
-	devc->pwm[0].duty = (double)pwm0_duty / pwm0_period;
+	devc->pwm[0].freq = (double)FPGA_F_PWM / (pwm0_period + 1);
+	devc->pwm[0].duty = (double)pwm0_duty / (pwm0_period + 1);
 	devc->pwm[1].enabled = !!(pwm1_conf & 1);
-	devc->pwm[1].freq = (double)FPGA_F_PWM / pwm1_period;
-	devc->pwm[1].duty = (double)pwm1_duty / pwm0_period;
+	devc->pwm[1].freq = (double)FPGA_F_PWM / (pwm1_period + 1);
+	devc->pwm[1].duty = (double)pwm1_duty / (pwm1_period + 1);
 
 	return SR_OK;
 }
@@ -1679,11 +1679,11 @@ SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
 	duty = devc->pwm[channel].duty * period;
 
 	if (channel == 0) {
-		TRY_WRITE_REG(sdi, REG_PWM0_CMP_PERIOD, period);
+		TRY_WRITE_REG(sdi, REG_PWM0_CMP_PERIOD, period - 1);
 		TRY_WRITE_REG(sdi, REG_PWM0_CMP_DUTY, duty);
 		TRY_WRITE_REG(sdi, REG_PWM0_CONF, devc->pwm[0].enabled);
 	} else if (channel == 1) {
-		TRY_WRITE_REG(sdi, REG_PWM1_CMP_PERIOD, period);
+		TRY_WRITE_REG(sdi, REG_PWM1_CMP_PERIOD, period - 1);
 		TRY_WRITE_REG(sdi, REG_PWM1_CMP_DUTY, duty);
 		TRY_WRITE_REG(sdi, REG_PWM1_CONF, devc->pwm[1].enabled);
 	}
