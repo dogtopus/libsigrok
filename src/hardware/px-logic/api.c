@@ -543,7 +543,7 @@ static int config_get_pwm(uint32_t key, GVariant **data,
 		*data = g_variant_new_double(devc->pwm[index].freq);
 		break;
 	case SR_CONF_DUTY_CYCLE:
-		*data = g_variant_new_double(devc->pwm[index].duty);
+		*data = g_variant_new_double(devc->pwm[index].duty * 100.0);
 		break;
 	default:
 		return SR_ERR_NA;
@@ -608,17 +608,13 @@ static int config_set_pwm(uint32_t key, GVariant *data,
 	switch (key) {
 	case SR_CONF_ENABLED:
 		devc->pwm[index].enabled = g_variant_get_boolean(data);
-		sr_info("PWM0 enabled: %s.",
-			devc->pwm[index].enabled ? "true" : "false");
 		ret = px_logic_send_config_pwm(sdi, index);
 		break;
 	case SR_CONF_OUTPUT_FREQUENCY:
 		devc->pwm[index].freq = g_variant_get_double(data);
-		sr_info("PWM0 freq: %fHz.", devc->pwm[index].freq);
 		break;
 	case SR_CONF_DUTY_CYCLE:
-		devc->pwm[index].duty = g_variant_get_double(data);
-		sr_info("PWM0 duty cycle: %f.", devc->pwm[index].duty);
+		devc->pwm[index].duty = g_variant_get_double(data) / 100.0;
 		break;
 	default:
 		ret = SR_ERR_NA;
