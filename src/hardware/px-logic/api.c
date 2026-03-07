@@ -262,7 +262,8 @@ static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
 		cg->channels = g_slist_append(cg->channels, ch);
 		ch_offset++;
 
-		/* TODO firmware version check. */
+		/* Probe MCU firmware version and upload the local firmware
+		   image to the device when needed. */
 		result_call = px_logic_probe_mcu(drvc->sr_ctx, usb->devhdl);
 		if (result_call == SR_OK) {
 			/* Change device state to INACTIVE to mark that it's
