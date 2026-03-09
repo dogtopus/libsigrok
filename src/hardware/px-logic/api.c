@@ -586,17 +586,14 @@ static int config_set_general(uint32_t key, GVariant *data,
 static int config_set_pwm(uint32_t key, GVariant *data,
 			  const struct sr_dev_inst *sdi, uint8_t index)
 {
-	int ret;
 	struct dev_context *const devc = sdi->priv;
 
 	if (index >= 2)
 		return SR_ERR_ARG;
 
-	ret = SR_OK;
 	switch (key) {
 	case SR_CONF_ENABLED:
 		devc->pwm[index].enabled = g_variant_get_boolean(data);
-		ret = px_logic_send_config_pwm(sdi, index);
 		break;
 	case SR_CONF_OUTPUT_FREQUENCY:
 		devc->pwm[index].freq = g_variant_get_double(data);
@@ -605,10 +602,10 @@ static int config_set_pwm(uint32_t key, GVariant *data,
 		devc->pwm[index].duty = g_variant_get_double(data) / 100.0;
 		break;
 	default:
-		ret = SR_ERR_NA;
+		return SR_ERR_NA;
 	}
 
-	return ret;
+	return px_logic_send_config_pwm(sdi, index);
 }
 
 static int config_list_general(uint32_t key, GVariant **data,
@@ -646,8 +643,8 @@ static int config_list_general(uint32_t key, GVariant **data,
 	return ret;
 }
 
-static int config_list_cg_pwm(uint32_t key, GVariant **data,
-			      const struct sr_dev_inst *sdi)
+static int config_list_pwm(uint32_t key, GVariant **data,
+			   const struct sr_dev_inst *sdi)
 {
 	(void)sdi;
 	int ret;
@@ -699,9 +696,9 @@ static int config_list(uint32_t key, GVariant **data,
 	if (!cg)
 		return config_list_general(key, data, sdi);
 	else if (g_strcmp0(cg->name, "PWM0") == 0)
-		return config_list_cg_pwm(key, data, sdi);
+		return config_list_pwm(key, data, sdi);
 	else if (g_strcmp0(cg->name, "PWM1") == 0)
-		return config_list_cg_pwm(key, data, sdi);
+		return config_list_pwm(key, data, sdi);
 
 	return SR_ERR_NA;
 }

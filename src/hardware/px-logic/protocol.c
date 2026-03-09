@@ -1644,9 +1644,8 @@ SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
 		return SR_ERR_ARG;
 	}
 
-	if (devc->pwm[channel].enabled && devc->pwm[channel].freq == 0) {
-		sr_err("Refusing to enable channel %u that has frequency value"
-		       " configured as 0.",
+	if (devc->pwm[channel].freq == 0) {
+		sr_err("Refusing to configure channel %u with frequency of 0.",
 		       channel);
 		return SR_ERR_ARG;
 	}
