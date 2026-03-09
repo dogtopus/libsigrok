@@ -32,7 +32,7 @@
 #define NUM_SIMUL_XFERS 32
 #define NUM_TRANSPOSE_WORKERS 3
 
-#define FPGA_VCCIO (3.334)
+#define FPGA_VCCIO 3.334
 #define FPGA_F_PWM_VREF SR_MHZ(120)
 #define FPGA_F_PWM SR_MHZ(125)
 #define FPGA_PWM_VREF_PERIOD SR_KHZ(10)
@@ -40,7 +40,7 @@
 
 /* 4MiB */
 #define MAX_BUF_SIZE_SS (4 * 1024 * 1024)
-/* 4.8Mbit */
+/* 4.8Mbit == 600KiB */
 #define MAX_BUF_SIZE_HS (4800000 / 8)
 #define MAX_TRIG_PERCENT 90
 
@@ -99,10 +99,10 @@
 #define FWRAM_MCU_PROG_FLASH 0
 #define FWRAM_FPGA_CFGRAM 4
 
-#define FWRAM_ADDR_FPGA (0x0)
-#define FWRAM_ADDR_MCU_BOOTLOADER (0x0)
-#define FWRAM_ADDR_MCU_USER (0xc000)
-#define FWRAM_SIZE_MCU_USER (0xc000)
+#define FWRAM_ADDR_FPGA 0x0
+#define FWRAM_ADDR_MCU_BOOTLOADER 0x0
+#define FWRAM_ADDR_MCU_USER 0xc000
+#define FWRAM_SIZE_MCU_USER 0xc000
 
 #define MODE_MASK_INIT (1 << 0)
 #define MODE_MASK_STREAMING (1 << 1)
@@ -110,7 +110,7 @@
 #define MODE_MASK_FILTER_EN (1 << 3)
 #define MODE_MASK_UNK_4 (1 << 4)
 
-#define CLK_CONF_MASK_SELECT (0x7)
+#define CLK_CONF_MASK_SELECT 0x7
 #define CLK_CONF_MASK_EDGE (1 << 3)
 
 #define PWM_CONF_MASK_EN (1 << 0)
@@ -122,7 +122,7 @@
 #define FPGA_STAGE1_NAME "px-logic-fpga-stage1.fw"
 #define FPGA_STAGE2_NAME "px-logic-fpga-stage2.fw"
 
-#define MCU_FW_VERSION (0x56900027)
+#define MCU_FW_VERSION 0x56900027
 
 struct trigger_status {
 	uint64_t sample_offset;
@@ -208,11 +208,10 @@ static int reg_ep_trx(struct libusb_device_handle *devhdl, uint8_t *tx_buf,
 		sr_err("Failed to transmit data to EP_REG: %s.",
 		       libusb_error_name(xfer_result));
 
-	if (xfer_result == LIBUSB_ERROR_TIMEOUT) {
+	if (xfer_result == LIBUSB_ERROR_TIMEOUT)
 		return SR_ERR_TIMEOUT;
-	} else if (xfer_result != LIBUSB_SUCCESS) {
+	else if (xfer_result != LIBUSB_SUCCESS)
 		return SR_ERR_IO;
-	}
 
 	if (xfer_count != tx_len) {
 		sr_err("Incomplete data transmitted to EP_REG: "
@@ -337,20 +336,18 @@ static int read_reg(const struct sr_dev_inst *sdi, uint32_t address,
 }
 
 /** Call read_reg() and bubble up the result code if there's an error. */
-#define TRY_READ_REG(sdi, address, value)            \
-	{                                            \
-		int res;                             \
-		res = read_reg(sdi, address, value); \
-		if (res != SR_OK)                    \
-			return res;                  \
+#define TRY_READ_REG(sdi, address, value)                      \
+	{                                                      \
+		const int res = read_reg(sdi, address, value); \
+		if (res != SR_OK)                              \
+			return res;                            \
 	}
 
-#define TRY_READ_REG_RAW(devhdl, address, value)            \
-	{                                                   \
-		int res;                                    \
-		res = read_reg_raw(devhdl, address, value); \
-		if (res != SR_OK)                           \
-			return res;                         \
+#define TRY_READ_REG_RAW(devhdl, address, value)                      \
+	{                                                             \
+		const int res = read_reg_raw(devhdl, address, value); \
+		if (res != SR_OK)                                     \
+			return res;                                   \
 	}
 
 /**
@@ -407,19 +404,17 @@ static int write_reg(const struct sr_dev_inst *sdi, uint32_t address,
 }
 
 /** Call write_reg() and bubble up the result code if there's an error. */
-#define TRY_WRITE_REG(sdi, address, value)            \
-	{                                             \
-		int res;                              \
-		res = write_reg(sdi, address, value); \
-		if (res != SR_OK)                     \
-			return res;                   \
+#define TRY_WRITE_REG(sdi, address, value)                      \
+	{                                                       \
+		const int res = write_reg(sdi, address, value); \
+		if (res != SR_OK)                               \
+			return res;                             \
 	}
-#define TRY_WRITE_REG_RAW(devhdl, address, value)            \
-	{                                                    \
-		int res;                                     \
-		res = write_reg_raw(devhdl, address, value); \
-		if (res != SR_OK)                            \
-			return res;                          \
+#define TRY_WRITE_REG_RAW(devhdl, address, value)                      \
+	{                                                              \
+		const int res = write_reg_raw(devhdl, address, value); \
+		if (res != SR_OK)                                      \
+			return res;                                    \
 	}
 
 /**
@@ -451,9 +446,8 @@ static int fwram_program(struct sr_context *sr_ctx,
 	sr_info("Uploading %s file '%s'", log_file_type, fw_name);
 
 	res = sr_resource_open(sr_ctx, &fw_file, SR_RESOURCE_FIRMWARE, fw_name);
-	if (res != SR_OK) {
+	if (res != SR_OK)
 		return res;
-	}
 
 	fw_size_page_aligned = MAX(ALIGN_4K(fw_file.size), erase_size);
 
@@ -732,12 +726,11 @@ static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
 		clk_div = 0;
 		found = FALSE;
 		for (clk_conf = 0; clk_conf < ARRAY_SIZE(clk_conf_table);
-		     clk_conf++) {
+		     clk_conf++)
 			if (clk_conf_table[clk_conf] == devc->samplerate) {
 				found = TRUE;
 				break;
 			}
-		}
 		if (!found) {
 			sr_err("Cannot determine clock config from samplerate"
 			       "%" PRIu64 ".",
@@ -746,9 +739,8 @@ static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
 		}
 	}
 
-	if (devc->invert_clock) {
+	if (devc->invert_clock)
 		clk_conf |= CLK_CONF_MASK_EDGE;
-	}
 
 	TRY_WRITE_REG(sdi, REG_CLK_CONF, clk_conf);
 	TRY_WRITE_REG(sdi, REG_CLK_DIV, clk_div);
@@ -778,11 +770,9 @@ static int cap_data_init(const struct sr_dev_inst *sdi)
 	max_enabled_channel = -1;
 
 	for (mask = devc->channels.mask, i = 0; i < 32 && mask != 0;
-	     mask >>= 1, i++) {
-		if (mask & 1) {
+	     mask >>= 1, i++)
+		if (mask & 1)
 			max_enabled_channel = i;
-		}
-	}
 
 	if (max_enabled_channel < 8)
 		sample_width = 1;
@@ -806,13 +796,11 @@ static int cap_data_init(const struct sr_dev_inst *sdi)
 		devc->buf_size / devc->channels.n * 8 * sample_width;
 	tr_pool_size = devc->cap.tr_buffer_size * NUM_SIMUL_XFERS;
 
-	sr_spew("%s: Allocating %zu bytes for transpose buffer", __func__,
-		tr_pool_size);
+	sr_spew("Allocating %zu bytes for transpose buffer", tr_pool_size);
 
 	devc->cap.tr_buffer = g_try_malloc0(tr_pool_size);
-	if (devc->cap.tr_buffer == NULL) {
+	if (devc->cap.tr_buffer == NULL)
 		return SR_ERR_MALLOC;
-	}
 
 	devc->cap.tr_workers = g_thread_pool_new(&xfer_sample_transpose_worker,
 						 devc, NUM_TRANSPOSE_WORKERS,
@@ -1002,9 +990,8 @@ static size_t xfer_sample_transpose(const uint8_t *src, size_t length,
 		for (channel = 0; channel < sample_width_bits; channel++) {
 			/* This stripe does not belong to this bit in the
 			   output sample. */
-			if (!(channel_mask & (1 << channel))) {
+			if (!(channel_mask & (1 << channel)))
 				continue;
-			}
 
 			/* Device endian. */
 			stripe = RL64(stripe_ptr);
@@ -1097,9 +1084,8 @@ static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 
 	devc->cap.data_xfers = g_try_malloc0(sizeof(struct libusb_transfer *) *
 					     NUM_SIMUL_XFERS);
-	if (devc->cap.data_xfers == NULL) {
+	if (devc->cap.data_xfers == NULL)
 		return SR_ERR_MALLOC;
-	}
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
 		xfer_buf = g_try_malloc0(devc->buf_size);
@@ -1143,9 +1129,8 @@ static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
 		ret = libusb_submit_transfer(devc->cap.data_xfers[i]);
-		if (ret != LIBUSB_SUCCESS) {
+		if (ret != LIBUSB_SUCCESS)
 			return SR_ERR;
-		}
 		devc->cap.n_active_data_xfers++;
 	}
 
@@ -1167,9 +1152,8 @@ static void cap_sample_xfer_end(const struct sr_dev_inst *sdi)
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
 		struct libusb_transfer *xfer = cap->data_xfers[i];
-		if (xfer != NULL) {
+		if (xfer != NULL)
 			libusb_cancel_transfer(xfer);
-		}
 	}
 }
 
@@ -1210,10 +1194,9 @@ static inline void cap_send(struct capture_state *const cap,
 		logic->data = &finished_data->tr_buffer[logic->length];
 		logic->length = total_len - logic->length;
 
-	} else if (G_UNLIKELY(tp == cap->samples_sent)) {
+	} else if (G_UNLIKELY(tp == cap->samples_sent))
 		/* Prevent zero length logic packet. */
 		std_session_send_df_trigger(sdi);
-	}
 
 send:
 	sr_session_send(sdi, &finished_data->packet);
@@ -1276,9 +1259,9 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	case CAP_STATE_WAIT_TRIGGER:
 		/* Continue to wait for trigger condition if trigger hasn't
 		   been fired yet. */
-		if (ep0_get_trigger_status(usb->devhdl, &status) != SR_OK) {
+		if (ep0_get_trigger_status(usb->devhdl, &status) != SR_OK)
 			break;
-		}
+
 		sr_spew("sample tick %" PRIu64, status.sample_offset);
 		if (status.pos_real != 0) {
 			sr_info("triggered after acquiring 0x%" PRIx64
@@ -1295,15 +1278,14 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 		break;
 	case CAP_STATE_HALT:
 		cap_sample_xfer_end(sdi);
-		sr_info("%s: Transferring capture state to CLEANUP.", __func__);
+		sr_info("Transferring capture state to CLEANUP.");
 		cap->state = CAP_STATE_CLEANUP;
 		break;
 	case CAP_STATE_CLEANUP:
 		/* Make sure all the transfers stop before proceeding. */
 		if (cap->n_active_data_xfers != 0 ||
-		    cap->send_seq != cap->recv_seq) {
+		    cap->send_seq != cap->recv_seq)
 			break;
-		}
 		/* Destroy resources. */
 		cap_sample_xfer_fini(sdi);
 		cap_data_fini(sdi);
@@ -1351,8 +1333,8 @@ SR_PRIV int px_logic_probe_mcu(struct sr_context *sr_ctx,
 	sr_info("MCU firmware version: 0x%08x", fw_version);
 
 	if (fw_version == MCU_FW_VERSION) {
-		sr_info("MCU firmware version is supported. Skip "
-			"MCU programming.");
+		sr_info("MCU firmware version is supported. Skip MCU "
+			"programming.");
 		return SR_OK;
 	}
 
@@ -1361,9 +1343,8 @@ SR_PRIV int px_logic_probe_mcu(struct sr_context *sr_ctx,
 	/* It's normal for the USB controller to stop responding after
 	   this call. Ignoring the timeout result. */
 	res = mcu_program(sr_ctx, devhdl, MCU_FW_NAME);
-	if (res != SR_OK && res != SR_ERR_TIMEOUT) {
+	if (res != SR_OK && res != SR_ERR_TIMEOUT)
 		return res;
-	}
 
 	/* Do not check the response code here, as the device will also
 	   not acknowledge a reset. */
@@ -1452,15 +1433,13 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 		}
 
 		ret = libusb_open(devlist[i], &usb->devhdl);
-		if (ret == LIBUSB_SUCCESS) {
-			if (usb->address == 0xff)
-				/*
-				 * First time we touch this device after FW
-				 * upload, so we don't know the address yet.
-				 */
-				usb->address =
-					libusb_get_device_address(devlist[i]);
-		} else if (ret == LIBUSB_ERROR_NO_DEVICE) {
+		if (ret == LIBUSB_SUCCESS && usb->address == 0xff)
+			/*
+			 * First time we touch this device after FW
+			 * upload, so we don't know the address yet.
+			 */
+			usb->address = libusb_get_device_address(devlist[i]);
+		else if (ret == LIBUSB_ERROR_NO_DEVICE) {
 			/* Do not log device not found error as it may come up
 			   when waiting for device to reboot. */
 			ret = SR_ERR;
@@ -1599,9 +1578,8 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 
 	/* Set input reference voltage. */
 	ret = conf_set_vref(sdi);
-	if (ret != SR_OK) {
+	if (ret != SR_OK)
 		return ret;
-	}
 
 	TRY_WRITE_REG(sdi, REG_CHANNEL_EN, 0);
 
@@ -1626,9 +1604,8 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	TRY_WRITE_REG(sdi, REG_TRIG_OUT_EN, 0);
 
 	ret = conf_config_sampler_clock(sdi);
-	if (ret != SR_OK) {
+	if (ret != SR_OK)
 		return ret;
-	}
 
 	TRY_WRITE_REG(sdi, REG_ENABLED_NUM_CH, devc->channels.n);
 
@@ -1636,9 +1613,8 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
 
 	ret = conf_convert_trigger(sdi);
-	if (ret != SR_OK) {
+	if (ret != SR_OK)
 		return ret;
-	}
 
 	TRY_WRITE_REG(sdi, REG_TRIG_POINT, devc->trigger.point);
 	TRY_WRITE_REG(sdi, REG_TRIG_LOW, devc->trigger.low_mask);
@@ -1697,14 +1673,12 @@ SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi)
 	int res;
 
 	res = px_logic_send_config(sdi);
-	if (res != SR_OK) {
+	if (res != SR_OK)
 		return res;
-	}
 
 	res = cap_data_init(sdi);
-	if (res != SR_OK) {
+	if (res != SR_OK)
 		return res;
-	}
 
 	res = cap_sample_xfer_init(sdi);
 	if (res != SR_OK) {
@@ -1733,7 +1707,6 @@ SR_PRIV int px_logic_acquisition_stop(const struct sr_dev_inst *sdi)
 	struct dev_context *const devc = sdi->priv;
 
 	sr_info("%s: Transferring capture state to HALT.", __func__);
-
 	cap_halt(devc);
 
 	return SR_OK;

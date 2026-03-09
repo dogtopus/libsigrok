@@ -218,12 +218,10 @@ static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
 
 		/* Change the variant. */
 		devc->config.variant = variant;
-		if (variant == VARIANT_UNKNOWN) {
+		if (variant == VARIANT_UNKNOWN)
 			goto done;
-		}
-		if (sdi->model != NULL) {
+		if (sdi->model != NULL)
 			g_free(sdi->model);
-		}
 		sdi->model = g_strdup(variant_names[variant]);
 
 		devc->config.max_buffer_depth = variant_depth[variant];
@@ -265,14 +263,13 @@ static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
 		/* Probe MCU firmware version and upload the local firmware
 		   image to the device when needed. */
 		result_call = px_logic_probe_mcu(drvc->sr_ctx, usb->devhdl);
-		if (result_call == SR_OK) {
+		if (result_call == SR_OK)
 			/* Change device state to INACTIVE to mark that it's
 			   ready to be opened. */
 			sdi->status = SR_ST_INACTIVE;
-		} else if (result_call != SR_ERR_DEV_CLOSED) {
+		else if (result_call != SR_ERR_DEV_CLOSED)
 			/* Other unhandled error. */
 			goto done;
-		}
 
 		result = SR_OK;
 	} else {
@@ -281,9 +278,9 @@ static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
 	}
 
 done:
-	if (claimed) {
+	if (claimed)
 		libusb_release_interface(usb->devhdl, USB_INTERFACE_MAIN);
-	}
+
 	libusb_close(usb->devhdl);
 	usb->devhdl = NULL;
 
@@ -319,33 +316,28 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			break;
 		}
 	}
-	if (conn) {
+	if (conn)
 		conn_devices = sr_usb_find(drvc->sr_ctx->libusb_ctx, conn);
-	} else {
+	else
 		conn_devices = NULL;
-	}
 
 	libusb_get_device_list(drvc->sr_ctx->libusb_ctx, &devlist);
 
 	for (i = 0; devlist[i]; i++) {
-		if (conn && !in_conn_devices(conn_devices, devlist[i])) {
+		if (conn && !in_conn_devices(conn_devices, devlist[i]))
 			continue;
-		}
 
 		libusb_get_device_descriptor(devlist[i], &des);
 
 		if (usb_get_port_path(devlist[i], connection_id,
-				      sizeof(connection_id)) < 0) {
+				      sizeof(connection_id)) < 0)
 			continue;
-		}
 
-		if (!check_vid_pid(&des)) {
+		if (!check_vid_pid(&des))
 			continue;
-		}
 
-		if (!process_descriptor(devlist[i], serial_number)) {
+		if (!process_descriptor(devlist[i], serial_number))
 			continue;
-		}
 
 		/* We now have pretty high confidence that this is a device
 		   we can talk to. Try to create a device instance and get more
@@ -367,10 +359,9 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->config.speed = libusb_get_device_speed(devlist[i]);
 		sdi->priv = devc;
 
-		if (devc->config.speed != LIBUSB_SPEED_SUPER) {
+		if (devc->config.speed != LIBUSB_SPEED_SUPER)
 			sr_warn("USB not running in SuperSpeed mode. Expect "
 				"degraded performance.");
-		}
 
 		res = probe_device(sdi, drvc, devlist[i]);
 		if (res != SR_OK) {
@@ -447,14 +438,12 @@ static int dev_open(struct sr_dev_inst *sdi)
 
 	/* FPGA initialization and register pull. */
 	ret = px_logic_probe_fpga(drvc->sr_ctx, usb->devhdl, reprogram_fpga);
-	if (ret != SR_OK) {
+	if (ret != SR_OK)
 		return ret;
-	}
 
 	ret = px_logic_receive_config(sdi);
-	if (ret != SR_OK) {
+	if (ret != SR_OK)
 		return ret;
-	}
 
 	return SR_OK;
 }
@@ -531,9 +520,8 @@ static int config_get_pwm(uint32_t key, GVariant **data,
 
 	int ret;
 
-	if (index >= 2) {
+	if (index >= 2)
 		return SR_ERR_ARG;
-	}
 
 	ret = SR_OK;
 	switch (key) {
@@ -601,9 +589,8 @@ static int config_set_pwm(uint32_t key, GVariant *data,
 	int ret;
 	struct dev_context *const devc = sdi->priv;
 
-	if (index >= 2) {
+	if (index >= 2)
 		return SR_ERR_ARG;
-	}
 
 	ret = SR_OK;
 	switch (key) {
@@ -681,13 +668,13 @@ static int config_get(uint32_t key, GVariant **data,
 		      const struct sr_dev_inst *sdi,
 		      const struct sr_channel_group *cg)
 {
-	if (!cg) {
+	if (!cg)
 		return config_get_general(key, data, sdi);
-	} else if (g_strcmp0(cg->name, "PWM0") == 0) {
+	else if (g_strcmp0(cg->name, "PWM0") == 0)
 		return config_get_pwm(key, data, sdi, 0);
-	} else if (g_strcmp0(cg->name, "PWM1") == 0) {
+	else if (g_strcmp0(cg->name, "PWM1") == 0)
 		return config_get_pwm(key, data, sdi, 1);
-	}
+
 	return SR_ERR_NA;
 }
 
@@ -695,13 +682,13 @@ static int config_set(uint32_t key, GVariant *data,
 		      const struct sr_dev_inst *sdi,
 		      const struct sr_channel_group *cg)
 {
-	if (!cg) {
+	if (!cg)
 		return config_set_general(key, data, sdi);
-	} else if (g_strcmp0(cg->name, "PWM0") == 0) {
+	else if (g_strcmp0(cg->name, "PWM0") == 0)
 		return config_set_pwm(key, data, sdi, 0);
-	} else if (g_strcmp0(cg->name, "PWM1") == 0) {
+	else if (g_strcmp0(cg->name, "PWM1") == 0)
 		return config_set_pwm(key, data, sdi, 1);
-	}
+
 	return SR_ERR_NA;
 }
 
@@ -709,13 +696,12 @@ static int config_list(uint32_t key, GVariant **data,
 		       const struct sr_dev_inst *sdi,
 		       const struct sr_channel_group *cg)
 {
-	if (!cg) {
+	if (!cg)
 		return config_list_general(key, data, sdi);
-	} else if (g_strcmp0(cg->name, "PWM0") == 0) {
+	else if (g_strcmp0(cg->name, "PWM0") == 0)
 		return config_list_cg_pwm(key, data, sdi);
-	} else if (g_strcmp0(cg->name, "PWM1") == 0) {
+	else if (g_strcmp0(cg->name, "PWM1") == 0)
 		return config_list_cg_pwm(key, data, sdi);
-	}
 
 	return SR_ERR_NA;
 }
