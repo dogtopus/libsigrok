@@ -245,7 +245,6 @@ static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
 
 		/* Add PWM channels. */
 		cg = sr_channel_group_new(sdi, "PWM0", NULL);
-		devc->cg_pwm = cg;
 
 		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
 				    "P0");
@@ -253,7 +252,6 @@ static int probe_device(struct sr_dev_inst *sdi, struct drv_context *drvc,
 		ch_offset++;
 
 		cg = sr_channel_group_new(sdi, "PWM1", NULL);
-		devc->cg_pwm = cg;
 
 		ch = sr_channel_new(sdi, ch_offset, SR_CHANNEL_ANALOG, FALSE,
 				    "P1");

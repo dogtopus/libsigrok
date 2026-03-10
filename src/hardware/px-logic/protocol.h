@@ -53,11 +53,32 @@ enum clk_config {
 	CLK_NUM_SUPPORTED,
 };
 
+/**
+ * Capture context state.
+ */
 enum cap_state {
+	/**
+	 * Capture context is initializing. All the resources owned by the
+	 * capture context may or may not already been initialized.
+	 */
 	CAP_STATE_INIT,
+	/**
+	 * Capture context is fully initialized and is waiting for trigger.
+	 */
 	CAP_STATE_WAIT_TRIGGER,
+	/**
+	 * Capture context is receiving samples from the device.
+	 */
 	CAP_STATE_SAMPLE_XFER,
+	/**
+	 * Capture context is being signaled to terminate. Cancelling all
+	 * transfers.
+	 */
 	CAP_STATE_HALT,
+	/**
+	 * Capture context is terminated, all transfers have been cancelled and
+	 * the resoources owned by the capture context must now be freed.
+	 */
 	CAP_STATE_CLEANUP,
 };
 
@@ -79,11 +100,21 @@ struct pwm_config {
 };
 
 struct channel_config {
+	/**
+	 * Total number of enabled channels.
+	 */
 	uint32_t n;
+	/**
+	 * Channel enablement mask (1=enabled, 0=disabled).
+	 */
 	uint32_t mask;
 };
 
+/**
+ * Cached trigger configuration derived from sigrok device context.
+ */
 struct trigger_config {
+	/** Desired trigger point in samples. */
 	uint32_t point;
 	uint32_t high_mask;
 	uint32_t low_mask;
@@ -91,32 +122,76 @@ struct trigger_config {
 	uint32_t falling_mask;
 };
 
-struct capture_state {
+struct capture_ctx {
+	/**
+	 * State.
+	 */
 	enum cap_state state;
+	/**
+	 * Where the trigger line should be drawn, in samples.
+	 */
 	uint32_t trigger_point_real;
+	/**
+	 * Sample width of the sigrok logic packets for this session.
+	 */
 	uint8_t sample_width;
+	/**
+	 * Whether to skip drawing the trigger line.
+	 */
 	gboolean skip_trigger;
 
+	/**
+	 * Number of currently active transfers ((re-)submitted and waiting for
+	 * data).
+	 */
 	uint8_t n_active_data_xfers;
+	/**
+	 * Dynamically allocated array of libusb transfers.
+	 */
 	struct libusb_transfer **data_xfers;
+	/**
+	 * Total number of received bytes from the device.
+	 */
 	uint64_t bytes_received;
+	/**
+	 * Total number of sample points processed by sigrok.
+	 */
 	uint64_t samples_sent;
+	/**
+	 * Device to driver monotonic sequence number.
+	 */
 	uint64_t recv_seq;
+	/**
+	 * Driver to sigrok monotonic sequence number.
+	 */
 	uint64_t send_seq;
 
-	struct sr_datafeed_logic logic;
-	struct sr_datafeed_packet packet;
+	/**
+	 * Data transpose buffer pool. Shall be allocated to fit all transposed
+	 * sample points from all transfers.
+	 */
 	uint8_t *tr_buffer;
+	/**
+	 * Size of each individual transpose buffer.
+	 */
 	size_t tr_buffer_size;
+	/**
+	 * Thread pool running sample transpose tasks.
+	 */
 	GThreadPool *tr_workers;
+	/**
+	 * Output queue for libusb transfers containing finished sample points.
+	 */
 	GAsyncQueue *tr_out_queue;
 };
 
 struct dev_context {
-	/* Hardware configuration. */
+	/* === Hardware configuration. === */
+
 	struct dev_config config;
 
-	/* Capture properties. */
+	/* === Capture properties. === */
+
 	gboolean streaming;
 	gboolean filter;
 	gboolean invert_clock;
@@ -128,14 +203,17 @@ struct dev_context {
 	struct trigger_config trigger;
 	struct pwm_config pwm[2];
 
-	/* Values derived from properties. */
+	/* === Values derived from properties. === */
+
+	/**
+	 * Buffer size of USB transfers.
+	 */
 	uint32_t buf_size;
 	struct channel_config channels;
 
 	struct sr_channel_group *cg_logic;
-	struct sr_channel_group *cg_pwm;
 
-	struct capture_state cap;
+	struct capture_ctx cap;
 };
 
 SR_PRIV enum device_variant

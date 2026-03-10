@@ -1075,7 +1075,7 @@ static void cap_sample_xfer_fini(const struct sr_dev_inst *sdi)
 static int cap_sample_xfer_init(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *const devc = sdi->priv;
-	struct capture_state *const cap = &devc->cap;
+	struct capture_ctx *const cap = &devc->cap;
 	struct sr_usb_dev_inst *const usb = sdi->conn;
 
 	struct sample_xfer_user_data *user_data;
@@ -1143,7 +1143,7 @@ static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
 static void cap_sample_xfer_end(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *const devc = sdi->priv;
-	struct capture_state *const cap = &devc->cap;
+	struct capture_ctx *const cap = &devc->cap;
 
 	uint32_t i;
 
@@ -1162,7 +1162,7 @@ static void cap_sample_xfer_end(const struct sr_dev_inst *sdi)
 /**
  * Helper function to send samples and trigger point data to sigrok.
  */
-static inline void cap_send(struct capture_state *const cap,
+static inline void cap_send(struct capture_ctx *const cap,
 			    const struct sr_dev_inst *const sdi,
 			    struct sample_xfer_user_data *const finished_data)
 {
@@ -1209,7 +1209,7 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	struct drv_context *const drvc = sdi->driver->context;
 	struct sr_usb_dev_inst *const usb = sdi->conn;
 	struct dev_context *const devc = sdi->priv;
-	struct capture_state *const cap = &devc->cap;
+	struct capture_ctx *const cap = &devc->cap;
 
 	struct trigger_status status;
 	struct libusb_transfer *finished_xfer;
