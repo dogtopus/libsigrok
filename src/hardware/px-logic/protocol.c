@@ -1433,13 +1433,15 @@ SR_PRIV int px_logic_dev_open(const struct sr_dev_inst *sdi)
 		}
 
 		ret = libusb_open(devlist[i], &usb->devhdl);
-		if (ret == LIBUSB_SUCCESS && usb->address == 0xff)
+		if (ret == LIBUSB_SUCCESS) {
 			/*
 			 * First time we touch this device after FW
 			 * upload, so we don't know the address yet.
 			 */
-			usb->address = libusb_get_device_address(devlist[i]);
-		else if (ret == LIBUSB_ERROR_NO_DEVICE) {
+			if (usb->address == 0xff)
+				usb->address =
+					libusb_get_device_address(devlist[i]);
+		} else if (ret == LIBUSB_ERROR_NO_DEVICE) {
 			/* Do not log device not found error as it may come up
 			   when waiting for device to reboot. */
 			ret = SR_ERR;
