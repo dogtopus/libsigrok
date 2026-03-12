@@ -46,6 +46,7 @@
 
 #define STRIPE_SIZE_BYTES sizeof(uint64_t)
 #define STRIPE_SIZE_BITS STRIPE_SIZE_BYTES * 8
+#define SAMPLES_IN_FRAME STRIPE_SIZE_BITS
 
 #define REQ_PACKET_LEN 0x08
 #define REQ_KEY_READ 0xfefe0001
@@ -845,6 +846,7 @@ static void xfer_sample_resubmit(struct libusb_transfer *xfer,
 		       libusb_error_name(res));
 		cap_halt(devc);
 	}
+	devc->cap.n_active_data_xfers++;
 }
 
 static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
@@ -852,34 +854,32 @@ static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 	struct sample_xfer_user_data *const user_data = xfer->user_data;
 	const struct sr_dev_inst *const sdi = user_data->sdi;
 	struct dev_context *const devc = sdi->priv;
+	const uint64_t frame_size = devc->channels.n * STRIPE_SIZE_BYTES;
 
-	uint64_t bytes_received;
 	uint64_t samples_received;
+
+	devc->cap.n_active_data_xfers--;
 
 	switch (xfer->status) {
 	case LIBUSB_TRANSFER_CANCELLED:
 		sr_spew("Transfer cancelled");
-		devc->cap.n_active_data_xfers--;
 		break;
 	case LIBUSB_TRANSFER_NO_DEVICE:
 	case LIBUSB_TRANSFER_OVERFLOW:
 	case LIBUSB_TRANSFER_ERROR:
 	case LIBUSB_TRANSFER_STALL:
-		sr_err("Unrecoverable status %d. Aborting session.",
-		       xfer->status);
-		devc->cap.n_active_data_xfers--;
+		sr_err("Unrecoverable status %s. Aborting session.",
+		       libusb_error_name(xfer->status));
 		cap_halt(devc);
 		break;
 	case LIBUSB_TRANSFER_TIMED_OUT:
 	case LIBUSB_TRANSFER_COMPLETED:
 		sr_spew("got %d bytes from sample FIFO", xfer->actual_length);
 
-		if (G_UNLIKELY(devc->cap.state != CAP_STATE_SAMPLE_XFER)) {
+		if (G_UNLIKELY(devc->cap.state != CAP_STATE_SAMPLE_XFER))
 			/* Ignore data and wait for cancellation if not
 			 * receiving samples. */
-			devc->cap.n_active_data_xfers--;
 			break;
-		}
 
 		if (G_UNLIKELY(xfer->actual_length == 0)) {
 			/* Timeout/0 bytes received could indicate that the
@@ -887,31 +887,29 @@ static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 			 * to just resubmit the transfer. */
 			xfer_sample_resubmit(xfer, devc);
 			break;
+		} else if (G_UNLIKELY(xfer->actual_length % frame_size != 0)) {
+			sr_err("Misaligned samples. Aborting session.");
+			cap_halt(devc);
+			break;
 		}
 
-		bytes_received = devc->cap.bytes_received + xfer->actual_length;
-		samples_received = bytes_received / devc->channels.n * 8;
+		samples_received =
+			devc->cap.samples_received +
+			xfer->actual_length / frame_size * SAMPLES_IN_FRAME;
 
 		/* Submit to the sample transpose thread pool. */
 		user_data->seq = devc->cap.send_seq;
 		g_thread_pool_push(devc->cap.tr_workers, xfer, NULL);
 
-		devc->cap.bytes_received = bytes_received;
+		devc->cap.samples_received = samples_received;
 		devc->cap.send_seq++;
 
 		if (G_UNLIKELY(samples_received >= devc->limit_samples)) {
 			sr_info("Got enough samples. Transferring capture "
 				"state to HALT.");
-			devc->cap.n_active_data_xfers--;
 			cap_halt(devc);
 			break;
 		}
-
-		/* Technically we aren't transferring anymore at this point.
-		   Decrement counter so the loop shutdown check logic will
-		   be happy. */
-		devc->cap.n_active_data_xfers--;
-		break;
 	}
 }
 
@@ -1065,7 +1063,7 @@ static void cap_sample_xfer_fini(const struct sr_dev_inst *sdi)
 	g_free(devc->cap.data_xfers);
 	devc->cap.data_xfers = NULL;
 	devc->cap.state = CAP_STATE_INIT;
-	devc->cap.bytes_received = 0;
+	devc->cap.samples_received = 0;
 	devc->cap.samples_sent = 0;
 }
 
@@ -1249,7 +1247,6 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 			cap_send(&devc->cap, sdi, finished_data);
 			cap->recv_seq++;
 			xfer_sample_resubmit(finished_xfer, devc);
-			cap->n_active_data_xfers++;
 		}
 	}
 

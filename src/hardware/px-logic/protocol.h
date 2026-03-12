@@ -150,9 +150,9 @@ struct capture_ctx {
 	 */
 	struct libusb_transfer **data_xfers;
 	/**
-	 * Total number of received bytes from the device.
+	 * Total number of received samples from the device.
 	 */
-	uint64_t bytes_received;
+	uint64_t samples_received;
 	/**
 	 * Total number of sample points processed by sigrok.
 	 */
