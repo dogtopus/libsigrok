@@ -141,11 +141,26 @@ struct sample_xfer_user_data {
 	uint8_t *tr_buffer;
 };
 
+struct pwm_reg {
+	uint32_t period;
+	uint32_t duty;
+	uint32_t conf;
+};
+
 static const uint64_t clk_conf_table[CLK_NUM_SUPPORTED] = {
 	[CLK_1GHZ] = SR_GHZ(1),	    [CLK_500MHZ] = SR_MHZ(500),
 	[CLK_250MHZ] = SR_MHZ(250), [CLK_125MHZ] = SR_MHZ(125),
 	[CLK_800MHZ] = SR_MHZ(800), [CLK_400MHZ] = SR_MHZ(400),
 	[CLK_200MHZ] = SR_MHZ(200), [CLK_100MHZ] = SR_MHZ(100),
+};
+
+static const struct pwm_reg pwm_reg_list[NUM_PWM_CHANNELS] = {
+	[0] = { .period = REG_PWM0_CMP_PERIOD,
+		.duty = REG_PWM0_CMP_DUTY,
+		.conf = REG_PWM0_CONF },
+	[1] = { .period = REG_PWM1_CMP_PERIOD,
+		.duty = REG_PWM1_CMP_DUTY,
+		.conf = REG_PWM1_CONF },
 };
 
 /* ===== Forward declaration of callbacks ===== */
@@ -648,6 +663,7 @@ static int conf_compute_pwm(double clk, double freq, double duty,
 	uint32_t period;
 
 	if (freq == 0) {
+		sr_err("PWM frequency shall not be 0.");
 		*out_period = 0;
 		*out_duty = 0;
 		return SR_ERR_ARG;
@@ -1670,31 +1686,29 @@ SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
 {
 	struct dev_context *const devc = sdi->priv;
 
+	const struct pwm_reg *reg;
+	const struct pwm_config *pwm;
+	int ret;
 	uint32_t period, duty;
 
-	if (channel >= 2) {
+	if (channel >= NUM_PWM_CHANNELS) {
 		sr_err("Invalid PWM channel %u", channel);
 		return SR_ERR_ARG;
 	}
 
-	if (devc->pwm[channel].freq == 0) {
-		sr_err("Refusing to configure channel %u with frequency of 0.",
+	reg = &pwm_reg_list[channel];
+	pwm = &devc->pwm[channel];
+
+	ret = conf_compute_pwm(FPGA_F_PWM, pwm->freq, pwm->duty, &period,
+			       &duty);
+	if (ret != SR_OK) {
+		sr_err("PWM channel %u contains invalid configuration",
 		       channel);
-		return SR_ERR_ARG;
 	}
 
-	period = FPGA_F_PWM / devc->pwm[channel].freq;
-	duty = devc->pwm[channel].duty * period;
-
-	if (channel == 0) {
-		TRY_WRITE_REG(sdi, REG_PWM0_CMP_PERIOD, period - 1);
-		TRY_WRITE_REG(sdi, REG_PWM0_CMP_DUTY, duty);
-		TRY_WRITE_REG(sdi, REG_PWM0_CONF, devc->pwm[0].enabled);
-	} else if (channel == 1) {
-		TRY_WRITE_REG(sdi, REG_PWM1_CMP_PERIOD, period - 1);
-		TRY_WRITE_REG(sdi, REG_PWM1_CMP_DUTY, duty);
-		TRY_WRITE_REG(sdi, REG_PWM1_CONF, devc->pwm[1].enabled);
-	}
+	TRY_WRITE_REG(sdi, reg->period, period);
+	TRY_WRITE_REG(sdi, reg->duty, duty);
+	TRY_WRITE_REG(sdi, reg->conf, pwm->enabled);
 
 	return SR_OK;
 }

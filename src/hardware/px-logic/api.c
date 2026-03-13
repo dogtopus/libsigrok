@@ -518,7 +518,7 @@ static int config_get_pwm(uint32_t key, GVariant **data,
 
 	int ret;
 
-	if (index >= 2)
+	if (index >= NUM_PWM_CHANNELS)
 		return SR_ERR_ARG;
 
 	ret = SR_OK;
@@ -586,7 +586,7 @@ static int config_set_pwm(uint32_t key, GVariant *data,
 {
 	struct dev_context *const devc = sdi->priv;
 
-	if (index >= 2)
+	if (index >= NUM_PWM_CHANNELS)
 		return SR_ERR_ARG;
 
 	switch (key) {

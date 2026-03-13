@@ -32,6 +32,8 @@
 #define VREF_STEP 0.1
 #define VREF_DEFAULT 2.0
 
+#define NUM_PWM_CHANNELS 2
+
 enum device_variant {
 	VARIANT_UNKNOWN = -1,
 	VARIANT_32,
@@ -199,7 +201,7 @@ struct dev_context {
 	uint64_t capture_ratio;
 
 	struct trigger_config trigger;
-	struct pwm_config pwm[2];
+	struct pwm_config pwm[NUM_PWM_CHANNELS];
 
 	/* === Values derived from properties. === */
 
