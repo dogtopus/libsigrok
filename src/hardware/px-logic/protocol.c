@@ -1704,6 +1704,7 @@ SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
 	if (ret != SR_OK) {
 		sr_err("PWM channel %u contains invalid configuration",
 		       channel);
+		return ret;
 	}
 
 	TRY_WRITE_REG(sdi, reg->period, period);
