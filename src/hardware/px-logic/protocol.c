@@ -39,10 +39,18 @@
 #define FPGA_PWM_VREF_PERIOD SR_KHZ(10)
 #define FPGA_INPUT_VDIV (1.0 / 2.0)
 
+/*
+ * Limit the maximum size of a single transfer to below the global maximum size
+ * of allocated transfers of all supported OS.
+ * This is so we can have at least 1 transfer going.
+ *
+ * TODO: Find a way to test these values.
+ */
 /* 4MiB */
 #define MAX_BUF_SIZE_SS (4 * 1024 * 1024)
-/* 4.8Mbit == 600KiB */
+/* 4.8Mbit == 600KB */
 #define MAX_BUF_SIZE_HS (4800000 / 8)
+
 #define MAX_PREPEND_LEN_BUFR 90
 #define MAX_PREPEND_LEN_STRM 10
 
@@ -119,7 +127,7 @@
 #define PWM_CONF_MASK_EN (1 << 0)
 
 #define ALIGN_4K(x) ((x / 4096 + 1) * 4096)
-#define ALIGN_CH(x, ch) ((x / (4096 * ch) + 1) * (4096 * ch))
+#define ALIGN_CH_FLOOR(x, ch) ((x / (4096 * ch)) * (4096 * ch))
 
 #define MCU_FW_NAME "px-logic-mcu.fw"
 #define FPGA_STAGE1_NAME "px-logic-fpga-stage1.fw"
@@ -721,11 +729,11 @@ static uint32_t conf_compute_buf_size(enum libusb_speed speed,
 {
 	uint32_t max, typical, final;
 
-	max = speed == LIBUSB_SPEED_SUPER ? MAX_BUF_SIZE_SS : MAX_BUF_SIZE_HS;
+	max = speed >= LIBUSB_SPEED_SUPER ? MAX_BUF_SIZE_SS : MAX_BUF_SIZE_HS;
 
 	typical = (samplerate * nchannels) / 8 / (1000 / BUF_SIZE_MS);
 
-	final = ALIGN_CH(MIN(max, typical), nchannels);
+	final = ALIGN_CH_FLOOR(MIN(max, typical), nchannels);
 	sr_spew("Computed buffer size is %u bytes", final);
 
 	return final;
@@ -1158,9 +1166,23 @@ static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
 	libusb_clear_halt(usb->devhdl, LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE);
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
+		if (devc->cap.state != CAP_STATE_SAMPLE_XFER) {
+			sr_spew("Early termination");
+			break;
+		}
 		ret = libusb_submit_transfer(devc->cap.data_xfers[i]);
-		if (ret != LIBUSB_SUCCESS)
-			return SR_ERR;
+		if (ret == LIBUSB_ERROR_NO_MEM) {
+			sr_warn("OS USB transfer limit reached after "
+				"submitting %d transfers. You may wish to "
+				"increase this limit if you are having "
+				"sample buffering problems.",
+				i);
+			return SR_OK;
+		} else if (ret != LIBUSB_SUCCESS) {
+			sr_err("Failed to submit transfer %d: %s", i,
+			       libusb_error_name(ret));
+			return SR_ERR_IO;
+		}
 		devc->cap.n_active_data_xfers++;
 	}
 
