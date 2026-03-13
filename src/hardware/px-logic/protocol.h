@@ -114,8 +114,6 @@ struct channel_config {
  * Cached trigger configuration derived from sigrok device context.
  */
 struct trigger_config {
-	/** Desired trigger point in samples. */
-	uint32_t point;
 	uint32_t high_mask;
 	uint32_t low_mask;
 	uint32_t rising_mask;

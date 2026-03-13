@@ -18,6 +18,7 @@
  */
 
 #include <config.h>
+#include <math.h>
 #include <strings.h>
 #include "protocol.h"
 
@@ -42,7 +43,8 @@
 #define MAX_BUF_SIZE_SS (4 * 1024 * 1024)
 /* 4.8Mbit == 600KiB */
 #define MAX_BUF_SIZE_HS (4800000 / 8)
-#define MAX_TRIG_PERCENT 90
+#define MAX_PREPEND_LEN_BUFR 90
+#define MAX_PREPEND_LEN_STRM 10
 
 #define STRIPE_SIZE_BYTES sizeof(uint64_t)
 #define STRIPE_SIZE_BITS STRIPE_SIZE_BYTES * 8
@@ -546,46 +548,65 @@ static gboolean fpga_reg_sanity_check(struct libusb_device_handle *devhdl)
 /* ===== Device configuration helpers ===== */
 
 /**
- * Convert and cache trigger-related register configuration from sigrok trigger
- * and capture ratio configuration. Note that this does not upload these values
- * to the FPGA, but merely prepare them.
+ * Calculate the number of samples to prepend before trigger.
  *
- * @param[in] sdi
+ * This should be the capture ratio (between 0 and 1) times the total number of
+ * samples, or portion of the hardware buffer (~10% in streaming mode and ~90%
+ * in buffered mode), whichever the shortest.
+ *
+ * @param buf_depth Hardware sample buffer depth (in bits).
+ * @param capture_ratio
+ * @param limit_samples
+ * @param num_channels Total number of enabled channels.
+ * @param streaming Device is in streaming mode?
+ * @return Number of samples to prepend.
+ */
+static uint32_t conf_compute_sample_prepend(uint32_t buf_depth,
+					    uint64_t capture_ratio,
+					    uint64_t limit_samples,
+					    uint32_t num_channels,
+					    gboolean streaming)
+{
+	uint32_t max_prepend_percent;
+	uint64_t tp, max_prepend;
+
+	/* Round down to the nearest 1024 samples as per vendor software. */
+	if (num_channels == 0)
+		max_prepend = 0;
+	else
+		max_prepend = (buf_depth / num_channels) / 1024 * 1024;
+
+	max_prepend_percent = streaming ? MAX_PREPEND_LEN_STRM :
+					  MAX_PREPEND_LEN_BUFR;
+
+	tp = capture_ratio * limit_samples / 100;
+	tp = MIN(max_prepend * max_prepend_percent / 100, tp);
+
+	return tp & 0xffffffff;
+}
+
+/**
+ * Convert sigrok trigger patterns to device trigger configuration register
+ * values.
+ *
+ * @param[in] trigger
+ * @param[out] out_trigger
  * @retval SR_OK
  */
-static int conf_convert_trigger(const struct sr_dev_inst *sdi)
+static int conf_compute_trigger(const struct sr_trigger *trigger,
+				struct trigger_config *out_trigger)
 {
-	struct dev_context *const devc = sdi->priv;
-	const uint32_t buf_depth = devc->config.max_buffer_depth;
-	const uint64_t capture_ratio = devc->capture_ratio;
-	const uint64_t limit_samples = devc->limit_samples;
-
-	struct sr_trigger *trigger;
 	struct sr_trigger_stage *stage;
 	struct sr_trigger_match *match;
 	const GSList *l, *m;
 	uint32_t mask;
-	uint32_t tp, max_trigger_percent;
-	uint64_t depth_per_ch;
 
-	trigger = sr_session_trigger_get(sdi->session);
+	//trigger = sr_session_trigger_get(session);
 
 	if (trigger == NULL) {
-		memset(&devc->trigger, 0, sizeof(devc->trigger));
+		memset(out_trigger, 0, sizeof(*out_trigger));
 		return SR_OK;
 	}
-
-	if (devc->channels.n == 0)
-		depth_per_ch = 0;
-	else
-		depth_per_ch = (buf_depth / devc->channels.n) & 0xfffffc00;
-
-	max_trigger_percent = devc->streaming ? 10 : MAX_TRIG_PERCENT;
-
-	tp = MAX(STRIPE_SIZE_BYTES, capture_ratio * limit_samples / 100);
-	tp = MIN(depth_per_ch * max_trigger_percent / 100, tp);
-
-	devc->trigger.point = tp;
 
 	for (l = trigger->stages; l; l = l->next) {
 		stage = l->data;
@@ -599,20 +620,20 @@ static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 
 			switch (match->match) {
 			case SR_TRIGGER_ONE:
-				devc->trigger.high_mask |= mask;
+				out_trigger->high_mask |= mask;
 				break;
 			case SR_TRIGGER_ZERO:
-				devc->trigger.low_mask |= mask;
+				out_trigger->low_mask |= mask;
 				break;
 			case SR_TRIGGER_RISING:
-				devc->trigger.rising_mask |= mask;
+				out_trigger->rising_mask |= mask;
 				break;
 			case SR_TRIGGER_FALLING:
-				devc->trigger.falling_mask |= mask;
+				out_trigger->falling_mask |= mask;
 				break;
 			case SR_TRIGGER_EDGE:
-				devc->trigger.rising_mask |= mask;
-				devc->trigger.falling_mask |= mask;
+				out_trigger->rising_mask |= mask;
+				out_trigger->falling_mask |= mask;
 				break;
 			}
 		}
@@ -621,26 +642,20 @@ static int conf_convert_trigger(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-/**
- * Convert and upload reference voltage PWM DAC configuration.
- *
- * These values are not used anywhere else, so they are not saved.
- *
- * @param[in] sdi
- * @retval SR_OK
- */
-static int conf_set_vref(const struct sr_dev_inst *sdi)
+static int conf_compute_pwm(double clk, double freq, double duty,
+			    uint32_t *out_period, uint32_t *out_duty)
 {
-	struct dev_context *const devc = sdi->priv;
-	const double vth = devc->voltage_threshold;
+	uint32_t period;
 
-	uint32_t period, duty;
+	if (freq == 0) {
+		*out_period = 0;
+		*out_duty = 0;
+		return SR_ERR_ARG;
+	}
 
-	period = FPGA_F_PWM_VREF / FPGA_PWM_VREF_PERIOD;
-	duty = ((vth * FPGA_INPUT_VDIV) / FPGA_VCCIO) * period;
-
-	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_PERIOD, period - 1);
-	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_DUTY, duty);
+	period = round(clk / freq);
+	*out_period = period - 1;
+	*out_duty = round(duty * period);
 
 	return SR_OK;
 }
@@ -675,7 +690,7 @@ conf_compute_channel_config(const struct sr_dev_inst *sdi)
 }
 
 /**
- * Calculate buffer size based on capture configuration.
+ * Calculate transfer buffer size based on capture configuration.
  *
  * Buffer size is currently set to approximately 10ms, aligned to both RAM page
  * size (4KiB) and frame size (num of channels * stripe size).
@@ -707,20 +722,21 @@ static uint32_t conf_compute_buf_size(enum libusb_speed speed,
  * @retval SR_OK
  * @retval SR_ERR_ARG
  */
-static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
+static int conf_compute_sampler_clock(uint64_t samplerate,
+				      gboolean invert_clock,
+				      uint32_t *out_clk_conf,
+				      uint32_t *out_clk_div)
 {
-	struct dev_context *const devc = sdi->priv;
-
 	uint32_t clk_conf, clk_div;
 	gboolean found;
 
-	if (devc->samplerate < SR_MHZ(100)) {
+	if (samplerate < SR_MHZ(100)) {
 		clk_conf = CLK_100MHZ;
-		clk_div = SR_MHZ(100) / devc->samplerate - 1;
-		if (SR_MHZ(100) / (clk_div + 1) != devc->samplerate) {
+		clk_div = SR_MHZ(100) / samplerate - 1;
+		if (SR_MHZ(100) / (clk_div + 1) != samplerate) {
 			sr_err("Cannot determine divider value from samplerate"
 			       "%" PRIu64 ".",
-			       devc->samplerate);
+			       samplerate);
 			return SR_ERR_ARG;
 		}
 	} else {
@@ -728,23 +744,23 @@ static int conf_config_sampler_clock(const struct sr_dev_inst *sdi)
 		found = FALSE;
 		for (clk_conf = 0; clk_conf < ARRAY_SIZE(clk_conf_table);
 		     clk_conf++)
-			if (clk_conf_table[clk_conf] == devc->samplerate) {
+			if (clk_conf_table[clk_conf] == samplerate) {
 				found = TRUE;
 				break;
 			}
 		if (!found) {
 			sr_err("Cannot determine clock config from samplerate"
 			       "%" PRIu64 ".",
-			       devc->samplerate);
+			       samplerate);
 			return SR_ERR_ARG;
 		}
 	}
 
-	if (devc->invert_clock)
+	if (invert_clock)
 		clk_conf |= CLK_CONF_MASK_EDGE;
 
-	TRY_WRITE_REG(sdi, REG_CLK_CONF, clk_conf);
-	TRY_WRITE_REG(sdi, REG_CLK_DIV, clk_div);
+	*out_clk_conf = clk_conf;
+	*out_clk_div = clk_div;
 
 	return SR_OK;
 }
@@ -862,7 +878,7 @@ static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 
 	switch (xfer->status) {
 	case LIBUSB_TRANSFER_CANCELLED:
-		sr_spew("Transfer cancelled");
+		sr_spew("Transfer cancelled.");
 		break;
 	case LIBUSB_TRANSFER_NO_DEVICE:
 	case LIBUSB_TRANSFER_OVERFLOW:
@@ -874,7 +890,7 @@ static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer)
 		break;
 	case LIBUSB_TRANSFER_TIMED_OUT:
 	case LIBUSB_TRANSFER_COMPLETED:
-		sr_spew("got %d bytes from sample FIFO", xfer->actual_length);
+		sr_spew("Got %d bytes from sample FIFO", xfer->actual_length);
 
 		if (G_UNLIKELY(devc->cap.state != CAP_STATE_SAMPLE_XFER))
 			/* Ignore data and wait for cancellation if not
@@ -1259,12 +1275,12 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 		if (ep0_get_trigger_status(usb->devhdl, &status) != SR_OK)
 			break;
 
-		sr_spew("sample tick %" PRIu64, status.sample_offset);
+		sr_spew("Sample tick %" PRIu64, status.sample_offset);
 		if (status.pos_real != 0) {
-			sr_info("triggered after acquiring 0x%" PRIx64
-				" samples, point at 0x%" PRIx32 ", int trigger"
-				" status 0x%08" PRIx32 ". Transferring capture"
-				" state to SAMPLE_XFER.",
+			sr_info("Triggered after %" PRIu64 " samples, "
+				"point at %" PRId32 ", "
+				"trigger status 0x%08" PRIx32 ". "
+				"Transferring capture state to SAMPLE_XFER.",
 				status.sample_offset, status.pos_real,
 				status.activated);
 			cap->state = CAP_STATE_SAMPLE_XFER;
@@ -1568,17 +1584,41 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *const devc = sdi->priv;
-	int ret;
-	uint32_t mode_reg;
+	const double vth = devc->voltage_threshold;
+	const uint64_t limit_samples = devc->limit_samples;
 
+	int ret;
+	uint32_t mode_reg, vref_period, vref_duty, clk_conf, clk_div,
+		prepend_samples;
+
+	/* Prepare required register values. */
 	devc->channels = conf_compute_channel_config(sdi);
 	devc->buf_size = conf_compute_buf_size(
 		devc->config.speed, devc->samplerate, devc->channels.n);
 
-	/* Set input reference voltage. */
-	ret = conf_set_vref(sdi);
+	ret = conf_compute_pwm(FPGA_F_PWM_VREF, FPGA_PWM_VREF_PERIOD,
+			       vth * FPGA_INPUT_VDIV / FPGA_VCCIO, &vref_period,
+			       &vref_duty);
 	if (ret != SR_OK)
 		return ret;
+
+	ret = conf_compute_sampler_clock(devc->samplerate, devc->invert_clock,
+					 &clk_conf, &clk_div);
+	if (ret != SR_OK)
+		return ret;
+
+	prepend_samples = conf_compute_sample_prepend(
+		devc->config.max_buffer_depth, devc->capture_ratio,
+		limit_samples, devc->channels.n, devc->streaming);
+
+	ret = conf_compute_trigger(sr_session_trigger_get(sdi->session),
+				   &devc->trigger);
+	if (ret != SR_OK)
+		return ret;
+
+	/* Set input reference voltage. */
+	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_PERIOD, vref_period);
+	TRY_WRITE_REG(sdi, REG_PWM_VREF_CMP_DUTY, vref_duty);
 
 	TRY_WRITE_REG(sdi, REG_CHANNEL_EN, 0);
 
@@ -1595,27 +1635,21 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	TRY_WRITE_REG(sdi, REG_SAMPLE_BUFFER_SIZE, devc->buf_size);
 	TRY_WRITE_REG(sdi, REG_XFER_BUFFER_SIZE, devc->buf_size);
 
-	TRY_WRITE_REG(sdi, REG_NUM_SAMPLES_LO,
-		      devc->limit_samples & 0xffffffff);
-	TRY_WRITE_REG(sdi, REG_NUM_SAMPLES_HI, devc->limit_samples >> 32);
+	TRY_WRITE_REG(sdi, REG_NUM_SAMPLES_LO, limit_samples & 0xffffffff);
+	TRY_WRITE_REG(sdi, REG_NUM_SAMPLES_HI, limit_samples >> 32);
 
 	TRY_WRITE_REG(sdi, REG_TRIG_EXT_MODE, 0);
 	TRY_WRITE_REG(sdi, REG_TRIG_OUT_EN, 0);
 
-	ret = conf_config_sampler_clock(sdi);
-	if (ret != SR_OK)
-		return ret;
+	TRY_WRITE_REG(sdi, REG_CLK_CONF, clk_conf);
+	TRY_WRITE_REG(sdi, REG_CLK_DIV, clk_div);
 
 	TRY_WRITE_REG(sdi, REG_ENABLED_NUM_CH, devc->channels.n);
 
 	/* Clear the BLOCK_START register. */
 	TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
 
-	ret = conf_convert_trigger(sdi);
-	if (ret != SR_OK)
-		return ret;
-
-	TRY_WRITE_REG(sdi, REG_TRIG_POINT, devc->trigger.point);
+	TRY_WRITE_REG(sdi, REG_TRIG_POINT, prepend_samples);
 	TRY_WRITE_REG(sdi, REG_TRIG_LOW, devc->trigger.low_mask);
 	TRY_WRITE_REG(sdi, REG_TRIG_HIGH, devc->trigger.high_mask);
 	TRY_WRITE_REG(sdi, REG_TRIG_RISING, devc->trigger.rising_mask);
