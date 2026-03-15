@@ -1,6 +1,7 @@
 /*
  * This file is part of the libsigrok project.
  *
+ * Copyright (C) 2024-2026 Zongyu Zhan <913461865@qq.com>
  * Copyright (C) 2026 dogtopus <dogtopus@users.noreply.github.com>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -1166,15 +1167,11 @@ static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
 	libusb_clear_halt(usb->devhdl, LIBUSB_ENDPOINT_IN | EP_FIFO_SAMPLE);
 
 	for (i = 0; i < NUM_SIMUL_XFERS; i++) {
-		if (devc->cap.state != CAP_STATE_SAMPLE_XFER) {
-			sr_spew("Early termination");
-			break;
-		}
 		ret = libusb_submit_transfer(devc->cap.data_xfers[i]);
 		if (ret == LIBUSB_ERROR_NO_MEM) {
 			sr_warn("OS USB transfer limit reached after "
 				"submitting %d transfers. You may wish to "
-				"increase this limit if you are having "
+				"increase this limit if you encounter "
 				"sample buffering problems.",
 				i);
 			return SR_OK;
