@@ -56,6 +56,16 @@ enum clk_config {
 	CLK_NUM_SUPPORTED,
 };
 
+enum ext_trigger_slope_config {
+	EXT_TRIG_OFF,
+	EXT_TRIG_RISING,
+	EXT_TRIG_HIGH,
+	EXT_TRIG_FALLING,
+	EXT_TRIG_LOW,
+	EXT_TRIG_EDGE,
+	EXT_TRIG_MAX,
+};
+
 /**
  * Capture context state.
  */
@@ -201,6 +211,7 @@ struct dev_context {
 	uint64_t limit_samples;
 	uint64_t capture_ratio;
 
+	enum ext_trigger_slope_config ext_slope;
 	struct trigger_config trigger;
 	struct pwm_config pwm[NUM_PWM_CHANNELS];
 

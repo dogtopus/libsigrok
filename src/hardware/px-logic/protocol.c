@@ -832,7 +832,8 @@ static int cap_data_init(const struct sr_dev_inst *sdi)
 
 	devc->cap.skip_trigger =
 		!(devc->trigger.low_mask | devc->trigger.high_mask |
-		  devc->trigger.rising_mask | devc->trigger.falling_mask);
+		  devc->trigger.rising_mask | devc->trigger.falling_mask) &&
+		devc->ext_slope == EXT_TRIG_OFF;
 
 	devc->cap.tr_buffer_size =
 		devc->buf_size / devc->channels.n * 8 * sample_width;
@@ -1517,7 +1518,7 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 
 	uint32_t clk_conf, clk_select, clk_div, mode, num_samples_lo,
 		num_samples_hi, pwm0_conf, pwm0_period, pwm0_duty, pwm1_conf,
-		pwm1_period, pwm1_duty;
+		pwm1_period, pwm1_duty, ext_slope;
 	uint64_t samplerate;
 
 	clk_conf = 0;
@@ -1532,6 +1533,7 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	pwm1_conf = 0;
 	pwm1_period = 0;
 	pwm1_duty = 0;
+	ext_slope = 0;
 
 	TRY_READ_REG(sdi, REG_CLK_CONF, &clk_conf);
 	TRY_READ_REG(sdi, REG_CLK_DIV, &clk_div);
@@ -1544,6 +1546,7 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	TRY_READ_REG(sdi, REG_PWM1_CONF, &pwm1_conf);
 	TRY_READ_REG(sdi, REG_PWM1_CMP_PERIOD, &pwm1_period);
 	TRY_READ_REG(sdi, REG_PWM1_CMP_DUTY, &pwm1_duty);
+	TRY_READ_REG(sdi, REG_TRIG_EXT_MODE, &ext_slope);
 
 	sr_info("Clock configuration on device: CLK_CONF = 0x%08x, "
 		"CLK_DIV = 0x%08x",
@@ -1613,6 +1616,11 @@ SR_PRIV int px_logic_receive_config(const struct sr_dev_inst *sdi)
 	devc->pwm[1].freq = (double)FPGA_F_PWM / (pwm1_period + 1);
 	devc->pwm[1].duty = (double)pwm1_duty / (pwm1_period + 1);
 
+	sr_info("REG_TRIG_EXT_MODE=0x%08x", ext_slope);
+	if (ext_slope < EXT_TRIG_MAX) {
+		devc->ext_slope = ext_slope;
+	}
+
 	return SR_OK;
 }
 
@@ -1673,8 +1681,9 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	TRY_WRITE_REG(sdi, REG_NUM_SAMPLES_LO, limit_samples & 0xffffffff);
 	TRY_WRITE_REG(sdi, REG_NUM_SAMPLES_HI, limit_samples >> 32);
 
-	TRY_WRITE_REG(sdi, REG_TRIG_EXT_MODE, 0);
-	TRY_WRITE_REG(sdi, REG_TRIG_OUT_EN, 0);
+	TRY_WRITE_REG(sdi, REG_TRIG_EXT_MODE, devc->ext_slope);
+	/* Always enable trigger out channel. */
+	TRY_WRITE_REG(sdi, REG_TRIG_OUT_EN, 1);
 
 	TRY_WRITE_REG(sdi, REG_CLK_CONF, clk_conf);
 	TRY_WRITE_REG(sdi, REG_CLK_DIV, clk_div);

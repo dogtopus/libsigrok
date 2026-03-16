@@ -54,6 +54,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_CLOCK_EDGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_SLOPE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 };
 
 static const uint32_t devopts_cg_pwm[] = {
@@ -77,6 +78,12 @@ static const uint64_t samplerates[] = {
 static const char *clock_edges[] = {
 	"rising",
 	"falling",
+};
+
+static const char *trigger_slopes[] = {
+	[EXT_TRIG_OFF] = "off", [EXT_TRIG_RISING] = "r",
+	[EXT_TRIG_HIGH] = "1",	[EXT_TRIG_FALLING] = "f",
+	[EXT_TRIG_LOW] = "0",	[EXT_TRIG_EDGE] = "e",
 };
 
 static const char *variant_names[] = {
@@ -510,6 +517,9 @@ static int config_get_general(uint32_t key, GVariant **data,
 	case SR_CONF_CLOCK_EDGE:
 		*data = g_variant_new_string(clock_edges[devc->invert_clock]);
 		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		*data = g_variant_new_string(trigger_slopes[devc->ext_slope]);
+		break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -580,6 +590,12 @@ static int config_set_general(uint32_t key, GVariant *data,
 			return SR_ERR_ARG;
 		devc->invert_clock = !!idx;
 		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		idx = std_str_idx(data, ARRAY_AND_SIZE(trigger_slopes));
+		if (idx < 0)
+			return SR_ERR_ARG;
+		devc->ext_slope = idx;
+		break;
 	default:
 		ret = SR_ERR_NA;
 	}
@@ -639,6 +655,9 @@ static int config_list_general(uint32_t key, GVariant **data,
 		break;
 	case SR_CONF_CLOCK_EDGE:
 		*data = g_variant_new_strv(ARRAY_AND_SIZE(clock_edges));
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(trigger_slopes));
 		break;
 	default:
 		return SR_ERR_NA;
