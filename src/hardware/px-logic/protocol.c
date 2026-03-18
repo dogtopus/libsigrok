@@ -23,9 +23,13 @@
 #include <strings.h>
 #include "protocol.h"
 
+#ifndef PX_LOGIC_FORCE_TIMER
+#define PX_LOGIC_FORCE_TIMER 0
+#endif
+
 #define BUF_SIZE_MS 10
 
-#define POLL_TIMEOUT BUF_SIZE_MS
+#define POLL_TIMEOUT (BUF_SIZE_MS / 2)
 #define REQ_TIMEOUT 1000
 #define MCU_PROGRAM_DELAY 100
 #define FPGA_CHECK_PERIOD_US 10000
@@ -100,7 +104,7 @@
 #define REG_FWRAM_WRITE_BANK 0x2020
 #define REG_NUM_SAMPLES_LO 0x2024
 #define REG_NUM_SAMPLES_HI 0x2028
-#define REG_BLOCK_START 0x202c
+#define REG_SAMPLER_RESET 0x202c
 #define REG_MCU_RESET 0x2030
 #define REG_MCU_FW_VERSION 0x2034
 #define REG_ENABLED_NUM_CH 0x204c
@@ -178,6 +182,10 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data);
 static void LIBUSB_CALL xfer_sample_event(struct libusb_transfer *xfer);
 static void xfer_sample_transpose_worker(gpointer data, gpointer user_data);
 
+static int loop_begin(const struct sr_dev_inst *sdi,
+		      sr_receive_data_callback cb);
+static int loop_end(const struct sr_dev_inst *sdi);
+
 /* ===== Device control and register access routines ===== */
 
 static int ep0_get_trigger_status(libusb_device_handle *devhdl,
@@ -191,7 +199,7 @@ static int ep0_get_trigger_status(libusb_device_handle *devhdl,
 	ret = libusb_control_transfer(
 		devhdl, LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN,
 		EP0_CMD_GET_TRIGGER_STATUS, 0x0000, 0x0000, trx, sizeof(trx),
-		POLL_TIMEOUT / 2);
+		POLL_TIMEOUT);
 
 	if (ret < 0) {
 		sr_err("Unable to get trigger status: %s.",
@@ -1171,10 +1179,10 @@ static int cap_sample_xfer_begin(const struct sr_dev_inst *sdi)
 		ret = libusb_submit_transfer(devc->cap.data_xfers[i]);
 		if (ret == LIBUSB_ERROR_NO_MEM) {
 			sr_warn("OS USB transfer limit reached after "
-				"submitting %d transfers. You may wish to "
-				"increase this limit if you encounter "
-				"sample buffering problems.",
-				i);
+				"submitting %d transfers (%u bytes total). "
+				"You may wish to increase this limit if you "
+				"encounter sample buffering problems.",
+				i, devc->buf_size * i);
 			return SR_OK;
 		} else if (ret != LIBUSB_SUCCESS) {
 			sr_err("Failed to submit transfer %d: %s", i,
@@ -1340,7 +1348,7 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 		cap_data_fini(sdi);
 		/* Safe to terminate the event loop. */
 		std_session_send_df_end(sdi);
-		usb_source_remove(sdi->session, sdi->session->ctx);
+		loop_end(sdi);
 		break;
 	default:
 		/* Do nothing. */
@@ -1348,6 +1356,31 @@ static int cap_top_event_handler(int fd, int revents, void *cb_data)
 	}
 
 	return TRUE;
+}
+
+/* ===== Happy Winblows shims ===== */
+
+static int loop_begin(const struct sr_dev_inst *sdi,
+		      sr_receive_data_callback cb)
+{
+#if defined(_WIN32) || PX_LOGIC_FORCE_TIMER == 1
+	sr_spew("Using timer to process events.");
+	return sr_session_source_add(sdi->session, -1, 0, POLL_TIMEOUT, cb,
+				     (void *)sdi);
+#else
+	sr_spew("Using libusb pollfd to process events.");
+	return usb_source_add(sdi->session, sdi->session->ctx, POLL_TIMEOUT, cb,
+			      (void *)sdi);
+#endif
+}
+
+static int loop_end(const struct sr_dev_inst *sdi)
+{
+#if defined(_WIN32) || PX_LOGIC_FORCE_TIMER == 1
+	return sr_session_source_remove(sdi->session, -1);
+#else
+	return usb_source_remove(sdi->session, sdi->session->ctx);
+#endif
 }
 
 /* ===== Public interface ===== */
@@ -1691,7 +1724,7 @@ SR_PRIV int px_logic_send_config(const struct sr_dev_inst *sdi)
 	TRY_WRITE_REG(sdi, REG_ENABLED_NUM_CH, devc->channels.n);
 
 	/* Clear the BLOCK_START register. */
-	TRY_WRITE_REG(sdi, REG_BLOCK_START, 0);
+	TRY_WRITE_REG(sdi, REG_SAMPLER_RESET, 0);
 
 	TRY_WRITE_REG(sdi, REG_TRIG_POINT, prepend_samples);
 	TRY_WRITE_REG(sdi, REG_TRIG_LOW, devc->trigger.low_mask);
@@ -1768,8 +1801,13 @@ SR_PRIV int px_logic_acquisition_start(const struct sr_dev_inst *sdi)
 		return res;
 	}
 
-	usb_source_add(sdi->session, sdi->session->ctx, POLL_TIMEOUT,
-		       &cap_top_event_handler, (void *)sdi);
+	res = loop_begin(sdi, &cap_top_event_handler);
+	if (res != SR_OK) {
+		write_reg(sdi, REG_SAMPLER_RESET, 0);
+		cap_sample_xfer_fini(sdi);
+		cap_data_fini(sdi);
+		return res;
+	}
 
 	sr_info("%s: Transferring capture state to WAIT_TRIGGER.", __func__);
 	devc->cap.state = CAP_STATE_WAIT_TRIGGER;
