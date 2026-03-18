@@ -632,7 +632,7 @@ static int config_list_general(uint32_t key, GVariant **data,
 			       const struct sr_dev_inst *sdi)
 {
 	int ret;
-	struct dev_context *const devc = sdi->priv;
+	struct dev_context *devc;
 
 	ret = SR_OK;
 
@@ -649,6 +649,13 @@ static int config_list_general(uint32_t key, GVariant **data,
 							 VREF_STEP);
 		break;
 	case SR_CONF_SAMPLERATE:
+		if (sdi == NULL) {
+			sr_err("Listing options of SR_CONF_SAMPLERATE without "
+			       "sdi. This should not happen.");
+			return SR_ERR_NA;
+		}
+
+		devc = sdi->priv;
 		*data = std_gvar_samplerates(
 			samplerates,
 			variant_samplerate_cutoff[devc->config.variant]);
