@@ -1768,9 +1768,12 @@ SR_PRIV int px_logic_send_config_pwm(const struct sr_dev_inst *sdi,
 		return ret;
 	}
 
+	TRY_WRITE_REG(sdi, reg->conf, 0);
+
 	TRY_WRITE_REG(sdi, reg->period, period);
 	TRY_WRITE_REG(sdi, reg->duty, duty);
-	TRY_WRITE_REG(sdi, reg->conf, pwm->enabled);
+	if (pwm->enabled)
+		TRY_WRITE_REG(sdi, reg->conf, pwm->enabled);
 
 	return SR_OK;
 }
