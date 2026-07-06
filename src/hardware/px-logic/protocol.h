@@ -1,7 +1,7 @@
 /*
  * This file is part of the libsigrok project.
  *
- * Copyright (C) 2024-2026 Zongyu Zhan <913461865@qq.com>
+ * Copyright (C) 2024-2026 PXView Developers <913461865@qq.com>
  * Copyright (C) 2026 dogtopus <dogtopus@users.noreply.github.com>
  *
  * This program is free software: you can redistribute it and/or modify

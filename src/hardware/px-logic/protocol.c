@@ -1,7 +1,7 @@
 /*
  * This file is part of the libsigrok project.
  *
- * Copyright (C) 2024-2026 Zongyu Zhan <913461865@qq.com>
+ * Copyright (C) 2024-2026 PXView Developers <913461865@qq.com>
  * Copyright (C) 2026 dogtopus <dogtopus@users.noreply.github.com>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -138,7 +138,7 @@
 #define FPGA_STAGE1_NAME "px-logic-fpga-stage1.fw"
 #define FPGA_STAGE2_NAME "px-logic-fpga-stage2.fw"
 
-#define MCU_FW_VERSION 0x56900027
+#define MCU_FW_VERSION 0x56900028
 
 struct trigger_status {
 	uint64_t sample_offset;
@@ -767,7 +767,7 @@ static int conf_compute_sampler_clock(uint64_t samplerate,
 		clk_conf = CLK_100MHZ;
 		clk_div = SR_MHZ(100) / samplerate - 1;
 		if (SR_MHZ(100) / (clk_div + 1) != samplerate) {
-			sr_err("Cannot determine divider value from samplerate"
+			sr_err("Cannot determine divider value from samplerate "
 			       "%" PRIu64 ".",
 			       samplerate);
 			return SR_ERR_ARG;
@@ -782,7 +782,7 @@ static int conf_compute_sampler_clock(uint64_t samplerate,
 				break;
 			}
 		if (!found) {
-			sr_err("Cannot determine clock config from samplerate"
+			sr_err("Cannot determine clock config from samplerate "
 			       "%" PRIu64 ".",
 			       samplerate);
 			return SR_ERR_ARG;
